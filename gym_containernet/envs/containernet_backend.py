@@ -33,7 +33,7 @@ SWITCH_FLOWS = [
 ]
 
 
-class MininetBackEnd(object):
+class ContainernetBackEnd(object):
     def create_host(self, h: int) -> Host:
         os.system('sudo docker rm -f mn.h%s' % (h + 1))
         return self.net.addDocker('h%s' % (h + 1), mac='00:00:00:00:00:0%s' % (h + 1), ip='10.0.0.%s' % (h + 1), dimage='iperf:latest', volumes=["/home/pmsdoliveira/workspace/containers/vol1/:/home/vol1"])
@@ -82,7 +82,7 @@ class MininetBackEnd(object):
 if __name__ == '__main__':
     os.system('sudo mn -c')
     setLogLevel('info')
-    be = MininetBackEnd(n_hosts=N_HOSTS, n_switches=N_SWITCHES, host_switch_links=HOST_SWITCH_LINKS,
+    be = ContainernetBackEnd(n_hosts=N_HOSTS, n_switches=N_SWITCHES, host_switch_links=HOST_SWITCH_LINKS,
                         switch_switch_links=SWITCH_SWITCH_LINKS, switch_flows=SWITCH_FLOWS)
     be.net.pingAll()
     be.net.stop()
