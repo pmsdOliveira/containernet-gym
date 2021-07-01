@@ -1,34 +1,44 @@
-from containernet_backend import ContainernetBackEnd as containernet
+from containernet_backend import ContainernetBackEnd as Containernet
+
+
+DOCKER_VOLUMES = ["/home/pmsdoliveira/workspace/containers/vol1/:/home/vol1"]
+N_HOSTS = 8
+N_SWITCHES = 10
+HOST_SWITCH_LINKS = [0, 9, 8, 7, 2, 1, 6, 5]
+
 
 class HostVertex:
-    def __init__(self, host_vertex=None):
-        if host_vertex is not None:
-            self.name = host_vertex["name"]
-            self.mac = host_vertex["mac"]
-            self.ip = host_vertex["ip"]
-            self.dimage = host_vertex["dimage"]
-            self.volumes = host_vertex["volumes"]
-            self.createHost()
+    def __init__(self, backend: Containernet, params: dict) -> None:
+        self.host = backend.create_host(params['name'], params['mac'], params['ip'],
+                                        'iperf:latest', DOCKER_VOLUMES)
 
-    def createHost(self):
-        containernet.create_host(self.name[-1])
 
-class Vertex:
-    def __init__(self, vertex=None):
-        if vertex is not None:
-            self.name = vertex["name"]
-            self.type = vertex["type"]
+class SwitchVertex:
+    def __init__(self, backend: Containernet, params: dict) -> None:
+        self.switch = backend.create_switch(params['name'], 'OpenFlow13')
 
-    def getType(self):
-        return self.type
 
+class Edge:
+    def __init__(self, backend: Containernet, origin: str, destination: str) -> None:
+        self.origin = origin
+        self.destination = destination
+        backend.create_host_switch_links(HOST_SWITCH_LINKS)
 
 class Graph:
-    def __init__(self, graph=None):
-        if graph is None:
-            graph = {}
-        self.graph = graph
+    def __init__(self, backend: Containernet, structure=None):
+        self.backend = backend
+        if structure is None:
+            self.structure = {}
+        else:
+            self.structure = structure
 
+        self.host_vertexes = []
+
+    def add_vertex(self, vertex):
+        if vertex not in self.structure:
+            self.structure[vertex] = []
+
+    """
     def getVertices(self):
         return list(self.graph.keys())
 
@@ -96,10 +106,11 @@ class Graph:
                     if not shortest or len(newpath) < len(shortest):
                         shortest = newpath
         return shortest
+    """
 
 
 if __name__ == '__main__':
-    graph = {
+    graph_description = {
         'h1': ['s1'],
         'h2': ['s10'],
         'h3': ['s9'],
@@ -120,5 +131,37 @@ if __name__ == '__main__':
         's10': ['h2', 's5', 's7']
     }
 
-    graph = Graph(graph=graph)
-    print(graph.find_shortest_path('h1', 'h2'))
+    hosts_descriptions = [
+        {
+            'name': 'h1',
+            'mac': '00:00:00:00:00:01',
+            'ip': '10.0.0.1',
+        },
+        {
+            'name': 'h2',
+            'mac': '00:00:00:00:00:02',
+            'ip': '10.0.0.2',
+        },
+        {
+            'name': 'h3',
+            'mac': '00:00:00:00:00:03',
+            'ip': '10.0.0.3',
+        },
+        {
+            'name': 'h4',
+            'mac': '00:00:00:00:00:04',
+            'ip': '10.0.0.4',
+        },
+    ]
+
+
+    switches_descriptions = [
+        {'name': 's1'}, {'name': 's2'}, {'name': 's3'}, {'name': 's4'}, {'name': 's5'}, {'name': 's6'}, {'name': 's7'},
+        {'name': 's8'}, {'name': 's9'}, {'name': 's10'}
+    ]
+    be = Containernet()
+    hosts = [HostVertex(be, params=hosts_descriptions[host_idx]) for host_idx in range(N_HOSTS)]
+    switches = [SwitchVertex(be, params=switches_descriptions[switch_idx]) for switch_idx in range(N_SWITCHES)]
+    be.net.start()
+    print("Done")
+    be.net.stop()
