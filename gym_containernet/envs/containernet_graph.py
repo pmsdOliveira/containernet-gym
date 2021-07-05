@@ -2,9 +2,6 @@ from containernet_backend import ContainernetBackEnd as Containernet
 
 
 DOCKER_VOLUMES = ["/home/pmsdoliveira/workspace/containers/vol1/:/home/vol1"]
-N_HOSTS = 8
-N_SWITCHES = 10
-HOST_SWITCH_LINKS = [0, 9, 8, 7, 2, 1, 6, 5]
 
 
 class HostVertex:
@@ -22,26 +19,42 @@ class Edge:
     def __init__(self, backend: Containernet, origin: str, destination: str) -> None:
         self.origin = origin
         self.destination = destination
-        backend.create_host_switch_links(HOST_SWITCH_LINKS)
+
 
 class Graph:
-    def __init__(self, backend: Containernet, structure=None):
-        self.backend = backend
+    def __init__(self, backend: Containernet, structure: dict = None) -> None:
+        self.backend: Containernet = backend
+        self.structure: dict = {}
+
         if structure is None:
-            self.structure = {}
-        else:
-            self.structure = structure
+            return
 
-        self.host_vertexes = []
+        self.structure = structure
+        self.host_vertexes: list[HostVertex] = []
+        self.switch_vertexes: list[SwitchVertex] = []
 
-    def add_vertex(self, vertex):
+        for vertex_name in self.structure.keys():
+            if vertex_name[0] == 'h':  # add host vertex
+                params = {
+                    'name': vertex_name,
+                    'mac': '00:00:00:00:%s' % (hex(int(vertex_name[1:]))[2:]).zfill(2),
+                    'ip': '10.0.0.%s' % int(vertex_name[1:])
+                }
+                self.host_vertexes.append(HostVertex(self.backend, params))
+            elif vertex_name[0] == 's':  # add switch vertex
+                params = {'name': vertex_name}
+                self.switch_vertexes.append(SwitchVertex(self.backend, params))
+
+
+    def add_vertex(self, graph: dict, vertex: str) -> dict:
         if vertex not in self.structure:
-            self.structure[vertex] = []
+            graph[vertex] = []
+        return graph
+
+    def get_vertices(self):
+        return list(self.structure.keys())
 
     """
-    def getVertices(self):
-        return list(self.graph.keys())
-
     def getEdges(self):
         edges = []
         for vertex in self.graph:
@@ -49,10 +62,6 @@ class Graph:
                 if {next_vertex, vertex} not in edges:
                     edges.append({vertex, next_vertex})
         return edges
-
-    def addVertex(self, vertex):
-        if vertex not in self.graph:
-            self.graph[vertex] = []
 
     def addEdge(self, edge):
         edge = set(edge)
@@ -131,37 +140,13 @@ if __name__ == '__main__':
         's10': ['h2', 's5', 's7']
     }
 
-    hosts_descriptions = [
-        {
-            'name': 'h1',
-            'mac': '00:00:00:00:00:01',
-            'ip': '10.0.0.1',
-        },
-        {
-            'name': 'h2',
-            'mac': '00:00:00:00:00:02',
-            'ip': '10.0.0.2',
-        },
-        {
-            'name': 'h3',
-            'mac': '00:00:00:00:00:03',
-            'ip': '10.0.0.3',
-        },
-        {
-            'name': 'h4',
-            'mac': '00:00:00:00:00:04',
-            'ip': '10.0.0.4',
-        },
-    ]
-
-
-    switches_descriptions = [
-        {'name': 's1'}, {'name': 's2'}, {'name': 's3'}, {'name': 's4'}, {'name': 's5'}, {'name': 's6'}, {'name': 's7'},
-        {'name': 's8'}, {'name': 's9'}, {'name': 's10'}
-    ]
     be = Containernet()
+    test = Graph(be, graph_description)
+
+    """
     hosts = [HostVertex(be, params=hosts_descriptions[host_idx]) for host_idx in range(N_HOSTS)]
     switches = [SwitchVertex(be, params=switches_descriptions[switch_idx]) for switch_idx in range(N_SWITCHES)]
     be.net.start()
     print("Done")
     be.net.stop()
+    """
