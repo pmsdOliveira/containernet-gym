@@ -1,1 +1,2 @@
-.idea/*
+.idea
+gym_containernet/envs/__pycache__
