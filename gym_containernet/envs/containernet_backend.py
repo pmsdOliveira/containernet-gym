@@ -1,13 +1,16 @@
 from mininet.net import Containernet
-from mininet.node import Controller, Host, Switch, OVSSwitch, OVSKernelSwitch
+from mininet.node import Controller, Host, Switch, OVSSwitch
 from mininet.link import TCLink
 
 from typing import Dict, List, Optional, Union
 import os
+import pickle
+import random
 import time
 
 # current image: iperf:latest, can change to ubuntu:trusty
-DOCKER_VOLUMES = ["/home/pmsdoliveira/workspace/containers/vol1/:/home/vol1"]
+DOCKER_LOCAL_FOLDER: str = "/home/pmsdoliveira/workspace/containernet-gym/containers/vol1"
+DOCKER_CONTAINER_FOLDER: str = "/home/vol1"
 
 
 def index_from_name(name: str) -> int:
@@ -18,13 +21,14 @@ def add_host(network: Containernet, name: str, log: bool = False) -> None:
     if log:
         print("* LOG: Cleanup of container mn.%s" % name)
     os.system('sudo docker rm -f mn.%s' % name)  # cleanup of previous docker containers with the same name
-    network.addDocker(name=name, dimage="iperf:latest", volumes=DOCKER_VOLUMES)
+    network.addDocker(name=name, dimage="iperf:latest",
+                      volumes=["%s:%s" % (DOCKER_LOCAL_FOLDER, DOCKER_CONTAINER_FOLDER)])
     if log:
         print("* LOG: Created host %s\n" % name)
 
 
 def add_switch(network: Containernet, name: str, log: bool = False) -> None:
-    network.addSwitch(name=name, cls=OVSKernelSwitch, protocols="OpenFlow13")
+    network.addSwitch(name=name, cls=OVSSwitch, protocols="OpenFlow13")
     if log:
         print("* LOG: Created switch %s" % name)
 
@@ -39,26 +43,27 @@ def add_nodes_from_graph(network: Containernet, graph: Dict[str, List[str]], log
         print("* LOG: Added a total of %s hosts and %s switches\n" % (len(network.hosts), len(network.switches)))
 
 
-def add_host_switch_link(network: Containernet, host: Host, switch: OVSKernelSwitch,
+def add_host_switch_link(network: Containernet, host: Host, switch: OVSSwitch,
                          switches_ports_map: List[List[str]], log: bool = False) -> None:
     if not network.linksBetween(host, switch):
-        network.addLink(host, switch, cls=TCLink)
+        network.addLink(host, switch, cls=TCLink, bw=100)
         switches_ports_map[index_from_name(switch.name)].append(host.name)
         if log:
             print("* LOG: Created link between host %s and switch %s" % (host.name, switch.name))
 
 
-def add_switch_switch_link(network: Containernet, switch1: OVSKernelSwitch, switch2: OVSKernelSwitch,
+def add_switch_switch_link(network: Containernet, switch1: OVSSwitch, switch2: OVSSwitch,
                            switches_ports_map: List[List[str]], log: bool = False) -> None:
     if not network.linksBetween(switch1, switch2):
-        network.addLink(switch1, switch2, cls=TCLink)
+        network.addLink(switch1, switch2, cls=TCLink, bw=1000)
         switches_ports_map[index_from_name(switch1.name)].append(switch2.name)
         switches_ports_map[index_from_name(switch2.name)].append(switch1.name)
         if log:
             print("* LOG: Created link between switch %s and switch %s" % (switch1.name, switch2.name))
 
 
-def add_link(network: Containernet, origin: str, destination: str, switches_ports_map: List[List[str]], log: bool = False) -> None:
+def add_link(network: Containernet, origin: str, destination: str, switches_ports_map: List[List[str]]
+             , log: bool = False) -> None:
     if origin[0] == 'h':
         add_host_switch_link(network, network.hosts[index_from_name(origin)],
                              network.switches[index_from_name(destination)], switches_ports_map, log)
@@ -154,46 +159,52 @@ def add_flows(network: Containernet, switches_ports_map: List[List[str]], shorte
         print('\n')
 
 
-def create_containernet_from_graph(graph: Dict[str, List[str]], log: bool = False) -> Containernet:
-    start_time: time = time.time()
-    os.system("sudo mn -c")  # cleanup of previously open Mininet topologies
-    network: Containernet = Containernet(listenPort=6633, ipBase='10.0.0.0/8', controller=Controller)
+def create_containernet(graph: Dict[str, List[str]], log: bool = False) -> Containernet:
+    network = Containernet(listenPort=6633, ipBase='10.0.0.0/8', controller=Controller)
     network.addController('c0')
     add_nodes_from_graph(network, graph, log)
-    switches_ports_map: List[List[str]] = add_links_from_graph(network, graph, log)
-    shortest_paths: List[List[str]] = find_all_shortest_paths_from_graph(network, graph, log)
+    switches_ports_map = add_links_from_graph(network, graph, log)
+    shortest_paths = find_all_shortest_paths_from_graph(network, graph, log)
     network.start()
     add_flows(network, switches_ports_map, shortest_paths, log)
-    if log:
-        network.pingAll()
-        print("Time spent: %.2fs" % (time.time() - start_time))
     return network
 
 
-if __name__ == '__main__':
-    """
-    topology: Dict[str, List[str]] = {
-        'h1': ['s1'],
-        'h2': ['s10'],
-        'h3': ['s9'],
-        'h4': ['s8'],
-        'h5': ['s3'],
-        'h6': ['s2'],
-        'h7': ['s7'],
-        'h8': ['s6'],
-        's1': ['h1', 's2', 's3'],
-        's2': ['h6', 's1', 's3', 's4', 's6'],
-        's3': ['h5', 's1', 's2', 's4', 's8'],
-        's4': ['s2', 's3', 's5', 's6', 's7'],
-        's5': ['s4', 's7', 's8', 's9', 's10'],
-        's6': ['h8', 's2', 's4', 's7'],
-        's7': ['h7', 's4', 's5', 's6', 's10'],
-        's8': ['h4', 's3', 's5', 's9'],
-        's9': ['h3', 's5', 's8'],
-        's10': ['h2', 's5', 's7']
-    }
-    """
+def start_containernet(graph: Dict[str, List[str]] = None, log: bool = False) -> Containernet:
+    start_time: time = time.time()
+    os.system("sudo mn -c")  # cleanup of previously open Mininet topologies
+    network = Containernet(listenPort=6633, ipBase='10.0.0.0/8', controller=Controller)
+    network.addController('c0')
+    add_nodes_from_graph(network, graph, log)
+    switches_ports_map = add_links_from_graph(network, graph, log)
+    shortest_paths = find_all_shortest_paths_from_graph(network, graph, log)
+    network.start()
+    add_flows(network, switches_ports_map, shortest_paths, log)
+    network.pingAll()
+    if log:
+        print("Network created and tested in: %.2fs" % (time.time() - start_time))
+    return network
 
+
+def stop_containernet(network: Containernet) -> None:
+    start_time: time = time.time()
+    network.stop()
+    print("Network dismounted in %.2fs" % (time.time() - start_time))
+
+
+def send_traffic(network: Containernet, origin: str, destination: str) -> None:
+    start_time: time = time.time()
+    server_cmd: str = "iperf -s -i 1 >& %s/server.log &" % DOCKER_CONTAINER_FOLDER
+    client_cmd: str = "iperf -c %s -t 10 >& %s/client.log &" % \
+                      (network.hosts[index_from_name(destination)].IP(), DOCKER_CONTAINER_FOLDER)
+    os.system("rm %s/*.log" % DOCKER_LOCAL_FOLDER)
+    network.hosts[index_from_name(destination)].cmd(server_cmd)
+    network.hosts[index_from_name(origin)].cmd(client_cmd)
+    time.sleep(15)
+    print("Traffic done for %.2fs" % (time.time() - start_time))
+
+
+if __name__ == '__main__':
     topology: Dict[str, List[str]] = {
         'h1': ['s1'],
         'h2': ['s1'],
@@ -233,5 +244,6 @@ if __name__ == '__main__':
         's20': ['s10', 's12', 's14', 's16']
     }
 
-    containernet: Containernet = create_containernet_from_graph(graph=topology, log=True)
-    containernet.stop()
+    containernet: Containernet = start_containernet(graph=topology, log=True)
+    send_traffic(containernet, "h1", "h16")
+    stop_containernet(containernet)
