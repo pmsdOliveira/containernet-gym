@@ -36,7 +36,7 @@ def add_nodes_from_graph(network: Containernet, graph: Dict[str, List[str]], log
         elif vertex[0] == 's':  # starts with 's', it's a switch
             add_switch(network, vertex, log)
     if log:
-        print("* LOG: Added a total of %s hosts and %s switches" % (len(network.hosts), len(network.switches)))
+        print("* LOG: Added a total of %s hosts and %s switches\n" % (len(network.hosts), len(network.switches)))
 
 
 def add_host_switch_link(network: Containernet, host: Host, switch: OVSKernelSwitch,
@@ -77,9 +77,10 @@ def add_links_from_graph(network: Containernet, graph: Dict[str, List[str]], log
         for edge in graph[vertex]:
             add_link(network, vertex, edge, switches_ports_map, log)
     if log:
-        print("* LOG: Added a total of %s links" % len(network.links))
+        print("* LOG: Added a total of %s links\n" % len(network.links))
         for switch_idx, switch_ports in enumerate(switches_ports_map):
             print("* LOG: s%s -> %s" % (switch_idx + 1, switch_ports))
+        print('\n')
     return switches_ports_map
 
 
@@ -108,6 +109,8 @@ def find_all_shortest_paths_from_graph(network: Containernet, graph: Dict[str, L
     for origin in range(len(network.hosts)):
         for destination in range(origin, len(network.hosts)):
             shortest_paths.append(find_shortest_path(graph, 'h%s' % (origin + 1), 'h%s' % (destination + 1), log=log))
+    if log:
+        print('\n')
     return shortest_paths
 
 
@@ -147,9 +150,12 @@ def add_flows(network: Containernet, switches_ports_map: List[List[str]], shorte
             host_ip: str = network.hosts[host].IP()
             output_port: int = choose_output_port(switch_name, host_name, switches_ports_map, shortest_paths)
             add_flow(network, switch_name, host_ip, output_port, log)
+    if log:
+        print('\n')
 
 
 def create_containernet_from_graph(graph: Dict[str, List[str]], log: bool = False) -> Containernet:
+    start_time: time = time.time()
     os.system("sudo mn -c")  # cleanup of previously open Mininet topologies
     network: Containernet = Containernet(listenPort=6633, ipBase='10.0.0.0/8', controller=Controller)
     network.addController('c0')
@@ -158,10 +164,14 @@ def create_containernet_from_graph(graph: Dict[str, List[str]], log: bool = Fals
     shortest_paths: List[List[str]] = find_all_shortest_paths_from_graph(network, graph, log)
     network.start()
     add_flows(network, switches_ports_map, shortest_paths, log)
+    if log:
+        network.pingAll()
+        print("Time spent: %.2fs" % (time.time() - start_time))
     return network
 
 
 if __name__ == '__main__':
+    """
     topology: Dict[str, List[str]] = {
         'h1': ['s1'],
         'h2': ['s10'],
@@ -182,9 +192,46 @@ if __name__ == '__main__':
         's9': ['h3', 's5', 's8'],
         's10': ['h2', 's5', 's7']
     }
+    """
 
-    start_time: time = time.time()
+    topology: Dict[str, List[str]] = {
+        'h1': ['s1'],
+        'h2': ['s1'],
+        'h3': ['s2'],
+        'h4': ['s2'],
+        'h5': ['s3'],
+        'h6': ['s3'],
+        'h7': ['s4'],
+        'h8': ['s4'],
+        'h9': ['s5'],
+        'h10': ['s5'],
+        'h11': ['s6'],
+        'h12': ['s6'],
+        'h13': ['s7'],
+        'h14': ['s7'],
+        'h15': ['s8'],
+        'h16': ['s8'],
+        's1': ['h1', 'h2', 's9', 's10'],
+        's2': ['h3', 'h4', 's9', 's10'],
+        's3': ['h5', 'h6', 's11', 's12'],
+        's4': ['h7', 'h8', 's11', 's12'],
+        's5': ['h9', 'h10', 's13', 's14'],
+        's6': ['h11', 'h12', 's13', 's14'],
+        's7': ['h13', 'h14', 's15', 's16'],
+        's8': ['h15', 'h16', 's15', 's16'],
+        's9': ['s1', 's2', 's17', 's18'],
+        's10': ['s1', 's2', 's19', 's20'],
+        's11': ['s3', 's4', 's17', 's18'],
+        's12': ['s3', 's4', 's19', 's20'],
+        's13': ['s5', 's6', 's17', 's18'],
+        's14': ['s5', 's6', 's19', 's20'],
+        's15': ['s7', 's8', 's17', 's18'],
+        's16': ['s7', 's8', 's19', 's20'],
+        's17': ['s9', 's11', 's13', 's15'],
+        's18': ['s9', 's11', 's13', 's15'],
+        's19': ['s10', 's12', 's14', 's16'],
+        's20': ['s10', 's12', 's14', 's16']
+    }
+
     containernet: Containernet = create_containernet_from_graph(graph=topology, log=True)
-    containernet.pingAll()
     containernet.stop()
-    print("Time spent: %.2fs" % (time.time() - start_time))
