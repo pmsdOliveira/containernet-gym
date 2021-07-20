@@ -1,3 +1,25 @@
-class ContainernetEnv:
+import gym4. Understanding the basic Layer 2 Switch application
+
+
+
+import gym_containernet.envs.containernet_backend as backend
+
+
+class ContainernetEnv(gym.Env):
     def __init__(self):
-        self.a = "test"
+        self.backend = backend
+
+    def seed(self, seed=None):
+        pass
+
+    def reset(self):
+        self.backend = self.backend.start_containernet()
+
+    def state(self):
+        pass
+
+    def step(self, action) -> (object, float, bool, dict):
+        pass
+
+    def render(self, mode='human'):
+        pass
