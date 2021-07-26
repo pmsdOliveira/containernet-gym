@@ -1,3 +1,5 @@
+import path_calculator
+
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
@@ -10,7 +12,10 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types
 
 from collections import defaultdict
+from datetime import datetime
+import networkx as nx
 from operator import attrgetter
+import os
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -120,7 +125,6 @@ def get_path(src, dst, first_port, final_port, link_available_bw, switches, adja
 def add_flow(datapath, priority, match, actions, switch_flows: List):
     ofproto = datapath.ofproto
     parser = datapath.ofproto_parser
-
     if not switch_flows or match not in switch_flows:
         switch_flows.append(match)
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
@@ -128,7 +132,6 @@ def add_flow(datapath, priority, match, actions, switch_flows: List):
                                 match=parser.OFPMatch(**match), instructions=inst,
                                 idle_timeout=0, hard_timeout=0)
         datapath.send_msg(mod)
-
     return switch_flows
 
 
@@ -159,6 +162,8 @@ class Controller(app_manager.RyuApp):
         self.link_last_tx_bytes: Dict[Tuple[int, int], int] = defaultdict(lambda: 0.0)
         self.link_last_clock: Dict[Tuple[int, int], float] = defaultdict(lambda: 0.0)
 
+        self.flows_bw: Dict[Tuple[int, int], float] = defaultdict(lambda: 0.0)
+
         self.topology_api_app = self
         self.monitor_thread = hub.spawn(self._monitor)
 
@@ -166,6 +171,21 @@ class Controller(app_manager.RyuApp):
         while True:
             for datapath in self.switch_datapath.values():
                 request_stats(datapath)
+            os.system("clear")
+            print(datetime.now().strftime("%H:%M:%S"), '\n')
+            for (src, dst), path in sorted(self.paths.items()):
+                print("%s -> %s: %s, %s" % (src, dst, path, self.flows_bw[src, dst]))
+            print('\n')
+            G = path_calculator.create_graph(self.host_switch_port, self.adjacency, self.link_available_bw)
+            for src in self.host_switch_port.keys():
+                for dst in self.host_switch_port.keys():
+                    if src != dst:
+                        paths = path_calculator.get_all_paths(G, src, dst)
+                        paths_bw = path_calculator.calculate_paths_bw(G, paths)
+                        installable_paths = path_calculator.create_installable_paths(
+                            paths, self.host_switch_port, self.adjacency)
+                        for flow in zip(installable_paths, paths_bw):
+                            print("%s -> %s: %s, %s" % (src, dst, flow[0], flow[1]))
             hub.sleep(5)
 
     def install_path(self, path: List[Tuple[int, int, int]], ev, src: str, dst: str) -> None:
@@ -178,7 +198,7 @@ class Controller(app_manager.RyuApp):
             self.switch_flows[switch] = add_flow(
                 datapath, 1, match, actions, self.switch_flows.get(switch, []))
 
-    def install_all_switch_paths(self, dpid, ev):
+    def install_all_paths_in_switch(self, dpid, ev):
         for src_mac, (src_switch, src_port) in self.host_switch_port.items():
             if src_switch == dpid:  # only compute paths for current switch
                 for dst_mac, (dst_switch, dst_port) in self.host_switch_port.items():
@@ -186,6 +206,14 @@ class Controller(app_manager.RyuApp):
                         path = get_path(src_switch, dst_switch, src_port, dst_port, self.link_available_bw,
                                         list(self.switch_datapath.keys()), self.adjacency)
                         self.install_path(path, ev, src_mac, dst_mac)
+
+    def calculate_flows_bw(self):
+        for (src, dst), path in self.paths.items():
+            if len(path) > 1:
+                flow_bw = 0
+                for hop in range(len(path) - 1):
+                    flow_bw += self.link_available_bw[path[hop][0], path[hop + 1][0]]
+                self.flows_bw[src, dst] = flow_bw
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -228,7 +256,8 @@ class Controller(app_manager.RyuApp):
                         # print("Available bandwidth %s -> %s = %.3f kbps" % (dpid, switch, self.link_available_bw[dpid, switch]))
                     self.link_last_tx_bytes[dpid, switch] = stat.tx_bytes
                     self.link_last_clock[dpid, switch] = time.time()
-        self.install_all_switch_paths(dpid, ev)
+        self.install_all_paths_in_switch(dpid, ev)
+        self.calculate_flows_bw()
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):

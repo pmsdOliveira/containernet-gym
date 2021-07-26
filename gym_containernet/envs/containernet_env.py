@@ -2,7 +2,7 @@ import gym4. Understanding the basic Layer 2 Switch application
 
 
 
-import gym_containernet.envs.containernet_backend as backend
+import gym_containernet.envs.topology_manager as backend
 
 
 class ContainernetEnv(gym.Env):
