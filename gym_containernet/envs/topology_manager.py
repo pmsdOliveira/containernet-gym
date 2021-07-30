@@ -72,6 +72,7 @@ def topology_from_file(network: Containernet, file: str, log: bool = False) -> N
 
 
 def start_containernet(file: str, log: bool = False) -> None:
+    os.system("clear")
     setLogLevel('info')
     os.system("sudo mn -c")
     network: Containernet = Containernet(controller=RemoteController, switch=OVSSwitch,

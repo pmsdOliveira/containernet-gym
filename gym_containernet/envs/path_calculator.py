@@ -4,6 +4,8 @@ from functools import reduce
 from typing import Dict, Iterator, List, Tuple, Union
 
 
+PATH_MAX_HOPS = 10
+
 # Custom types
 EndpointPair = Tuple[int, int]
 SwitchPortPair = Tuple[int, int]
@@ -30,8 +32,8 @@ def create_graph(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[Sw
     return graph
 
 
-def get_all_paths(graph: nx.Graph, src: str, dst: str) -> List:
-    return list(nx.all_simple_paths(graph, src, dst))
+def get_all_paths(graph: nx.Graph, src: str, dst: str, cuttof: int) -> List:
+    return list(nx.all_simple_paths(graph, src, dst, cutoff=cuttof))
 
 
 def create_installable_paths(paths: List[Union[str, int]], host_switch_port: Dict[str, SwitchPortPair],
@@ -65,7 +67,6 @@ def get_bottleneck(graph: nx.graph, path: List) -> float:
         if type(hop[0]) is not str and type(hop[1]) is not str:
             curr: float = graph.get_edge_data(*hop).get('weight', 0.0)
             bottleneck = curr if curr < bottleneck else bottleneck
-        # print(hop, bottleneck)
     return bottleneck
 
 
@@ -97,7 +98,7 @@ def possible_and_best_paths(host_switch_port: Dict[str, SwitchPortPair], adjacen
     for src in host_switch_port.keys():
         for dst in host_switch_port.keys():
             if src != dst:
-                possible_paths = get_all_paths(graph, src, dst)
+                possible_paths = get_all_paths(graph, src, dst, PATH_MAX_HOPS)
                 paths_bottlenecks = calculate_paths_bottlenecks(graph, possible_paths)
                 paths[src, dst] = create_installable_paths(possible_paths, host_switch_port, adjacency)
                 best_paths[src, dst] = select_best_installable_path(paths[src, dst], paths_bottlenecks)

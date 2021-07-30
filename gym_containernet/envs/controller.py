@@ -17,6 +17,9 @@ from datetime import datetime
 import os
 from typing import Any, Dict, List, Tuple, Union
 
+
+UPDATE_PERIOD = 10
+
 # Custom types
 EndpointPair = Tuple[int, int]
 SwitchPortPair = Tuple[int, int]
@@ -25,9 +28,10 @@ Match = Dict[Any, Union[int, str]]
 Path = List[Tuple[int, int, int]]
 
 
-def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], Dict[EndpointPair, float]):
+def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], Dict[EndpointPair, int], Dict[EndpointPair, float]):
     switch_ports: Dict[int, int] = {}
     host_switch_port: Dict[str, SwitchPortPair] = {}
+    adjacency: Dict[EndpointPair, int] = defaultdict(lambda: None)
     link_bw: Dict[EndpointPair, float] = {}
 
     with open(file, 'r') as topology:
@@ -47,14 +51,16 @@ def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], 
                     # necessary to match mininet ports
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     switch_ports[s2_idx] = switch_ports[s2_idx] + 1 if switch_ports.get(s2_idx) else 1
-                    link_bw[(s1_idx, s2_idx)] = float(atts[2])
-                    link_bw[(s2_idx, s1_idx)] = float(atts[2])
+                    adjacency[s1_idx, s2_idx] = switch_ports[s1_idx]
+                    adjacency[s2_idx, s1_idx] = switch_ports[s2_idx]
+                    link_bw[s1_idx, s2_idx] = float(atts[2])
+                    link_bw[s2_idx, s1_idx] = float(atts[2])
                 else:  # a host
                     hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
-    return host_switch_port, link_bw
+    return host_switch_port, adjacency, link_bw
 
 
 def request_stats(datapath: Datapath) -> None:
@@ -89,11 +95,11 @@ class Controller(app_manager.RyuApp):
         super(Controller, self).__init__(*args, **kwargs)
 
         self.host_switch_port: Dict[str, SwitchPortPair]
+        self.adjacency: Dict[EndpointPair, int]
         self.bw: Dict[EndpointPair, float]
-        self.host_switch_port, self.bw = host_discovery_from_topology_file("topology.txt")
+        self.host_switch_port, self.adjacency, self.bw = host_discovery_from_topology_file("topology.txt")
 
         self.switch_datapath: Dict[int, Datapath] = {}
-        self.adjacency: Dict[SwitchPortPair, int] = defaultdict(lambda: None)
 
         self.available_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
         self.used_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
@@ -115,7 +121,13 @@ class Controller(app_manager.RyuApp):
             print(datetime.now().strftime("%H:%M:%S\n"))
             for datapath in self.switch_datapath.values():
                 request_stats(datapath)
-            hub.sleep(10)
+            hub.sleep(UPDATE_PERIOD)
+
+    @set_ev_cls([event.EventSwitchEnter, event.EventSwitchLeave, event.EventPortAdd, event.EventPortDelete, event.EventPortModify,
+                 event.EventLinkAdd, event.EventLinkDelete])
+    def _get_topology_data(self, ev):
+        for switch in get_switch(self.topology_api_app, None):  # get all switches and corresponding datapaths
+            self.switch_datapath[switch.dp.id] = switch.dp
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):  # create table-miss entries
@@ -128,17 +140,6 @@ class Controller(app_manager.RyuApp):
         mod = datapath.ofproto_parser.OFPFlowMod(datapath=datapath, match=match, cookie=0, command=ofproto.OFPFC_ADD,
                                                  idle_timeout=0, hard_timeout=0, priority=0, instructions=inst)
         datapath.send_msg(mod)
-
-    @set_ev_cls([event.EventSwitchEnter, event.EventSwitchLeave, event.EventPortAdd, event.EventPortDelete, event.EventPortModify,
-                 event.EventLinkAdd, event.EventLinkDelete])
-    def _get_topology_data(self, ev):
-        for switch in get_switch(self.topology_api_app, None):  # get all switches and corresponding datapaths
-            self.switch_datapath[switch.dp.id] = switch.dp
-        links = [(link.src.dpid, link.dst.dpid, link.src.port_no, link.dst.port_no)
-                 for link in get_link(self.topology_api_app, None) if link.src.dpid != link.dst.dpid]
-        for s1, s2, port1, port2 in links:  # get adjacency for all switches
-            self.adjacency[s1, s2] = port1
-            self.adjacency[s2, s1] = port2
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
