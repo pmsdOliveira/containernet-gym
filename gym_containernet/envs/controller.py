@@ -6,11 +6,9 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.topology import event
-from ryu.topology.api import get_switch
 from ryu.controller.controller import Datapath
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, ether_types
+from ryu.lib.packet import packet, arp
 
 from collections import defaultdict
 from datetime import datetime
@@ -29,7 +27,9 @@ Match = Dict[Any, Union[int, str]]
 Path = List[Tuple[int, int, int]]
 
 
-def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], Dict[EndpointPair, int], Dict[EndpointPair, float]):
+def host_discovery_from_topology_file(file: str) -> (Dict[str, str], Dict[str, SwitchPortPair], Dict[EndpointPair, int],
+                                                     Dict[EndpointPair, float]):
+    host_ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
     host_switch_port: Dict[str, SwitchPortPair] = {}
     adjacency: Dict[EndpointPair, int] = defaultdict(lambda: None)
@@ -39,8 +39,10 @@ def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], 
         for line in topology.readlines()[2:]:
             atts: List[str] = line.split()
             if atts[0][0] != 'S':  # host connects to
+                host_ip: str = '10.0.0.%s' % (len(host_switch_port) + 1)
                 hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
                 host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
+                host_ip_mac[host_ip] = host_mac
                 if atts[1][0] == 'S':  # a switch
                     idx: int = int(atts[1][1:])
                     switch_ports[idx] = switch_ports[idx] + 1 if switch_ports.get(idx) else 1
@@ -61,7 +63,7 @@ def host_discovery_from_topology_file(file: str) -> (Dict[str, SwitchPortPair], 
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
-    return host_switch_port, adjacency, link_bw
+    return host_ip_mac, host_switch_port, adjacency, link_bw
 
 
 def request_stats(datapath: Datapath) -> None:
@@ -96,10 +98,11 @@ class Controller(app_manager.RyuApp):
         os.system("clear")
         super(Controller, self).__init__(*args, **kwargs)
 
+        self.host_ip_mac: Dict[str, str]
         self.host_switch_port: Dict[str, SwitchPortPair]
         self.adjacency: Dict[EndpointPair, int]
         self.bw: Dict[EndpointPair, float]
-        self.host_switch_port, self.adjacency, self.bw = host_discovery_from_topology_file("topology.txt")
+        self.host_ip_mac, self.host_switch_port, self.adjacency, self.bw = host_discovery_from_topology_file("topology.txt")
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
@@ -125,11 +128,10 @@ class Controller(app_manager.RyuApp):
                 request_stats(datapath)
             hub.sleep(UPDATE_PERIOD)
 
-    @set_ev_cls([event.EventSwitchEnter, event.EventSwitchLeave, event.EventPortAdd, event.EventPortDelete, event.EventPortModify,
-                 event.EventLinkAdd, event.EventLinkDelete])
-    def get_topology_data(self, ev) -> None:
-        for switch in get_switch(self.topology_api_app, None):  # get all switches and corresponding datapaths
-            self.switch_datapath[switch.dp.id] = switch.dp
+    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER])
+    def state_change_handler(self, ev):
+        datapath = ev.datapath
+        self.switch_datapath[datapath.id] = datapath
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
@@ -160,7 +162,7 @@ class Controller(app_manager.RyuApp):
         if len(set(self.updated)) == len(self.switch_datapath.keys()):  # if all switches have updated their bw
             self.updated = []  # reset it for next path calculation
             for (s1, s2), bw in self.available_bw.items():
-                if abs(bw - self.prev_available_bw.get((s1, s2), 0.0)) > 5000:  # only recalculate paths when BW changes > 5000
+                if abs(bw - self.prev_available_bw.get((s1, s2), 0.0)) > BW_VARIANCE:  # only recalculate paths when BW changes > 5000
                     self.paths, self.best_path = path_calculator.possible_and_best_paths(self.host_switch_port, self.adjacency, self.available_bw)
                     for src in self.host_switch_port.keys():
                         for dst in self.host_switch_port.keys():
@@ -183,30 +185,26 @@ class Controller(app_manager.RyuApp):
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocol(ethernet.ethernet)
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
+        pkt = pkt.get_protocol(arp.arp)
+        if not pkt:
             return
 
-        src = eth.src
-        dst = eth.dst
+        src = pkt.src_mac
+        dst = self.host_ip_mac[pkt.dst_ip]
         dpid = datapath.id
 
-        out_port: int = ofproto.OFPP_FLOOD
-        if dst in self.host_switch_port.keys():
-            path = self.best_path.get((src, dst), None)
-            if path:
-                for s, p1, p2 in path:
-                    if s == dpid:
-                        out_port = p2
+        out_port = None
+        path = self.best_path.get((src, dst), None)
+        if path:
+            for s, p1, p2 in path:
+                if s == dpid:
+                    out_port = p2
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
-        if out_port == ofproto.OFPP_FLOOD:
-            actions = []
-            for i in range(1, 23):
-                actions.append(parser.OFPActionOutput(i))
-        else:
+
+        if out_port:
             actions = [parser.OFPActionOutput(out_port)]
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
+            datapath.send_msg(out)

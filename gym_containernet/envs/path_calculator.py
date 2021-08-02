@@ -1,9 +1,9 @@
 import networkx as nx
 
-from functools import reduce
 from typing import Dict, Iterator, List, Tuple, Union
 
 
+HOST_SWITCH_BW = 100000
 PATH_MAX_HOPS = 10
 
 # Custom types
@@ -21,7 +21,7 @@ def create_graph(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[Sw
             graph.add_node(mac)
         if switch not in graph:
             graph.add_node("S%s" % switch)
-        graph.add_edge(mac, switch, weight=100000)
+        graph.add_edge(mac, switch, weight=HOST_SWITCH_BW)
     for s1, s2 in adjacency.keys():
         if s1 not in graph:
             graph.add_node(s1)
