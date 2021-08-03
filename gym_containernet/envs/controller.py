@@ -16,8 +16,9 @@ import os
 from typing import Any, Dict, List, Tuple, Union
 
 
+TOPOLOGY_FILE = "topology.txt"
 UPDATE_PERIOD = 10  # seconds
-BW_VARIANCE = 5000  # kbits
+BW_VARIANCE = 2000  # kbits
 
 # Custom types
 EndpointPair = Tuple[int, int]
@@ -27,8 +28,7 @@ Match = Dict[Any, Union[int, str]]
 Path = List[Tuple[int, int, int]]
 
 
-def host_discovery_from_topology_file(file: str) -> (Dict[str, str], Dict[str, SwitchPortPair], Dict[EndpointPair, int],
-                                                     Dict[EndpointPair, float]):
+def load_topology(file: str) -> (Dict[str, str], Dict[str, SwitchPortPair], Dict[EndpointPair, int], Dict[EndpointPair, float]):
     host_ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
     host_switch_port: Dict[str, SwitchPortPair] = {}
@@ -102,7 +102,7 @@ class Controller(app_manager.RyuApp):
         self.host_switch_port: Dict[str, SwitchPortPair]
         self.adjacency: Dict[EndpointPair, int]
         self.bw: Dict[EndpointPair, float]
-        self.host_ip_mac, self.host_switch_port, self.adjacency, self.bw = host_discovery_from_topology_file("topology.txt")
+        self.host_ip_mac, self.host_switch_port, self.adjacency, self.bw = load_topology(TOPOLOGY_FILE)
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
@@ -151,18 +151,16 @@ class Controller(app_manager.RyuApp):
         datapath = ev.msg.datapath
         dpid = datapath.id
         self.used_bw, self.available_bw, self.tx_bytes, self.clock = \
-            network_observator.update_bw(msg, list(self.switch_datapath.keys()), self.adjacency, self.bw, self.available_bw,
-                                         self.used_bw, self.tx_bytes, self.clock)
-        for dst in self.switch_datapath.keys():
-            if self.adjacency[dpid, dst]:
-                print("%s -> %s: %.3f Kbps" % (dpid, dst, self.available_bw[dpid, dst]))
-        print()
+            network_observator.update_bw(msg, list(self.switch_datapath.keys()), self.adjacency, self.bw, self.available_bw, self.used_bw,
+                                         self.tx_bytes, self.clock)
 
         self.updated.append(dpid)
-        if len(set(self.updated)) == len(self.switch_datapath.keys()):  # if all switches have updated their bw
+        if len(set(self.updated)) == len(self.switch_datapath.keys()):  # when all switches have updated their bw
             self.updated = []  # reset it for next path calculation
             for (s1, s2), bw in self.available_bw.items():
-                if abs(bw - self.prev_available_bw.get((s1, s2), 0.0)) > BW_VARIANCE:  # only recalculate paths when BW changes > 5000
+                print("%s -> %s: %.3f -> %.3f Kbps" % (s1, s2, self.prev_available_bw[s1, s2], bw))
+                if abs(bw - self.prev_available_bw[s1, s2]) > BW_VARIANCE:  # only recalculate paths when BW changes > BW_VARIANCE
+                    self.prev_available_bw = self.available_bw.copy()
                     self.paths, self.best_path = path_calculator.possible_and_best_paths(self.host_switch_port, self.adjacency, self.available_bw)
                     for src in self.host_switch_port.keys():
                         for dst in self.host_switch_port.keys():
@@ -170,8 +168,7 @@ class Controller(app_manager.RyuApp):
                                 self.switch_flows = install_path(src, dst, self.best_path[src, dst], self.switch_datapath, self.switch_flows)
                                 for path in self.paths[src, dst]:
                                     print("%s -> %s: %s    %s" % (src, dst, path, "IN USE" if path == self.best_path[src, dst] else ""))
-                            print()
-                    self.prev_available_bw = self.available_bw
+                                print()
                     break
                 else:
                     self.prev_available_bw[s1, s2] = self.available_bw[s1, s2]
