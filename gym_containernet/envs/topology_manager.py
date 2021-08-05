@@ -21,7 +21,7 @@ def add_host(network: Containernet, name: str) -> None:
 
 def add_switch(network: Containernet, name: str) -> None:
     if name not in network.keys():
-        network.addSwitch(name, cls=OVSSwitch, protocols="OpenFlow13")
+        network.addSwitch(name)
 
 
 def add_link(network: Containernet, source: str, destination: str, link_options: Dict) -> None:
