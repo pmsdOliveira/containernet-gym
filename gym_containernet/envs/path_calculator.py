@@ -3,8 +3,8 @@ import networkx as nx
 from typing import Dict, Iterator, List, Tuple, Union
 
 
-HOST_SWITCH_BW = 100000
-PATH_MAX_HOPS = 10
+HOST_SWITCH_BW = 1000000
+PATH_MAX_HOPS = 7
 
 # Custom types
 EndpointPair = Tuple[int, int]
@@ -13,8 +13,8 @@ MacPair = Tuple[str, str]
 Path = List[Tuple[int, int, int]]
 
 
-def create_graph(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[SwitchPortPair, int],
-                 available_bw: Dict[EndpointPair, float]) -> nx.Graph:
+def create_graph(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[SwitchPortPair, int], available_bw: Dict[EndpointPair, float]
+                 ) -> nx.Graph:
     graph: nx.Graph = nx.Graph()
     for mac, (switch, port) in host_switch_port.items():
         if mac not in graph:
@@ -32,12 +32,12 @@ def create_graph(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[Sw
     return graph
 
 
-def get_all_paths(graph: nx.Graph, src: str, dst: str, cuttof: int) -> List:
-    return list(nx.all_simple_paths(graph, src, dst, cutoff=cuttof))
+def get_all_paths(graph: nx.Graph, src: str, dst: str, cutoff: int) -> List:
+    return list(nx.all_simple_paths(graph, src, dst, cutoff=cutoff))
 
 
-def create_installable_paths(paths: List[Union[str, int]], host_switch_port: Dict[str, SwitchPortPair],
-                             adjacency: Dict[SwitchPortPair, int]) -> List[Path]:
+def create_installable_paths(paths: List[Union[str, int]], host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[SwitchPortPair, int]
+                             ) -> List[Path]:
     installable_paths: List[Path] = []
     for path in paths:
         installable_path: Path = []
@@ -70,36 +70,38 @@ def get_bottleneck(graph: nx.graph, path: List) -> float:
     return bottleneck
 
 
-def calculate_paths_bottlenecks(graph: nx.Graph, paths: List[Union[str, int]]) -> List[float]:
-    paths_bottlenecks: List[float] = []
+def paths_bottlenecks(graph: nx.Graph, paths: List[Union[str, int]]) -> List[float]:
+    bottlenecks: List[float] = []
     paths_pairwise: Iterator = map(nx.utils.pairwise, paths)
     for path_iterator in paths_pairwise:
         path: List = list(path_iterator)
         path_bottleneck: float = get_bottleneck(graph, path)
-        paths_bottlenecks.append(path_bottleneck)
-    return paths_bottlenecks
+        bottlenecks.append(path_bottleneck)
+    return bottlenecks
 
 
-def select_best_installable_path(installable_paths: List[Path], paths_bottlenecks: List[float]) -> Path:
+def best_installable_path(installable_paths: List[Path], bottlenecks: List[float]) -> Path:
     max_bottleneck: float = float("-Inf")
     best_path: Path = []
-    for path in zip(installable_paths, paths_bottlenecks):
-        if path[1] > max_bottleneck:
-            best_path = path[0]
-            max_bottleneck = path[1]
+    for (path, bottleneck) in zip(installable_paths, bottlenecks):
+        if bottleneck > max_bottleneck:
+            best_path = path
+            max_bottleneck = bottleneck
     return best_path
 
 
-def possible_and_best_paths(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[SwitchPortPair, int],
-                            available_bw: Dict[EndpointPair, float]) -> (List[List[Path]], List[Path]):
+def best_paths(host_switch_port: Dict[str, SwitchPortPair], adjacency: Dict[SwitchPortPair, int], available_bw: Dict[EndpointPair, float]
+               ) -> Dict[MacPair, Path]:
     paths: Dict[MacPair, List[Path]] = {}
-    best_paths: Dict[MacPair, Path] = {}
+    best: Dict[MacPair, Path] = {}
     graph: nx.Graph = create_graph(host_switch_port, adjacency, available_bw)
+    half_switches: float = len(set(s1 for (s1, s2) in adjacency.keys())) / 2
+    cutoff: int = int(half_switches) + 3 if half_switches % 1 else int(half_switches) + 2
     for src in host_switch_port.keys():
         for dst in host_switch_port.keys():
             if src != dst:
-                possible_paths = get_all_paths(graph, src, dst, PATH_MAX_HOPS)
-                paths_bottlenecks = calculate_paths_bottlenecks(graph, possible_paths)
+                possible_paths = get_all_paths(graph, src, dst, cutoff)
                 paths[src, dst] = create_installable_paths(possible_paths, host_switch_port, adjacency)
-                best_paths[src, dst] = select_best_installable_path(paths[src, dst], paths_bottlenecks)
-    return paths, best_paths
+                bottlenecks = paths_bottlenecks(graph, possible_paths)
+                best[src, dst] = best_installable_path(paths[src, dst], bottlenecks)
+    return best

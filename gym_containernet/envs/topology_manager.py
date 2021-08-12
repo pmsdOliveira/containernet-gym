@@ -1,23 +1,21 @@
 from mininet.net import Containernet
 from mininet.node import RemoteController, OVSSwitch, Host
 from mininet.cli import CLI
-from mininet.log import setLogLevel
 from mininet.link import TCLink
 
-from typing import Dict, List
 import os
 import time
+from typing import Dict, List
 
 
 TOPOLOGY_FILE: str = "topology.txt"
-DOCKER_LOCAL_FOLDER: str = "/home/pmsdoliveira/workspace/containernet-gym/volumes"
-DOCKER_CONTAINER_FOLDER: str = "/home/vol1"
+DOCKER_VOLUME: str = "/home/pmsdoliveira/workspace/gym-containernet/docker-volume"
 
 
 def add_host(network: Containernet, name: str) -> None:
     if name not in network.keys():
         os.system(f"sudo docker rm -f mn.{name}")
-        network.addDocker(name=name, dimage="iperf:latest", volumes=[f"{DOCKER_LOCAL_FOLDER}:{DOCKER_CONTAINER_FOLDER}"])
+        network.addDocker(name=name, dimage="iperf:latest", volumes=[f"{DOCKER_VOLUME}:/home/volume"])
 
 
 def add_switch(network: Containernet, name: str) -> None:
@@ -45,7 +43,6 @@ def load_topology(network: Containernet, file: str) -> None:
 
 def start_containernet(topology_file: str) -> Containernet:
     os.system("clear")
-    setLogLevel('info')
     os.system("sudo mn -c")
     network: Containernet = Containernet(controller=RemoteController, switch=OVSSwitch, link=TCLink, autoSetMacs=True, ipBase='10.0.0.0/8')
     load_topology(network, topology_file)
@@ -58,15 +55,12 @@ def create_slice(network: Containernet, source: str, destination: str, port: int
     src: Host = network.get(source)
     dst: Host = network.get(destination)
     if src and dst:
-        dst.cmd(f"iperf3 -s -p {port} -i 1 >& {DOCKER_CONTAINER_FOLDER}/{source}_{destination}_server.log &")
-        src.cmd(f"iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M >& {DOCKER_CONTAINER_FOLDER}/{source}_{destination}_client.log &")
-        time.sleep(duration + 10)
+        dst.cmd(f"iperf3 -s -p {port} -i 1 >& /home/volume/{source}_{destination}_server.log &")
+        src.cmd(f"iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M >& /home/volume/{source}_{destination}_client.log &")
+        time.sleep(1)
 
 
 if __name__ == '__main__':
     backend: Containernet = start_containernet(TOPOLOGY_FILE)
-    while True:
-        cli: str = input("containernet> ")
-        args: List[str] = cli.split()
-        if args[0] == 'slice' and len(args) == 6:
-            create_slice(backend, args[1], args[2], int(args[3]), int(args[4]), int(args[5]))
+    CLI(backend)
+    backend.stop()

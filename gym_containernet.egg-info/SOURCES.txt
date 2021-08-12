@@ -1,0 +1,7 @@
+README.md
+setup.py
+gym_containernet.egg-info/PKG-INFO
+gym_containernet.egg-info/SOURCES.txt
+gym_containernet.egg-info/dependency_links.txt
+gym_containernet.egg-info/requires.txt
+gym_containernet.egg-info/top_level.txt

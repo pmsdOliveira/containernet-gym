@@ -5,5 +5,5 @@ logger = logging.getLogger(__name__)
 
 register(
     id='containernet-v0',
-    entry_point='gym_containernet.envs:ContainernetEnv'
+    entry_point='gym_containernet.envs:ContainernetEnv',
 )
