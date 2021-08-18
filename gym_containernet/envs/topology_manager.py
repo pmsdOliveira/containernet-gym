@@ -1,10 +1,9 @@
 from mininet.net import Containernet
-from mininet.node import RemoteController, OVSSwitch, Host
+from mininet.node import RemoteController, OVSSwitch
 from mininet.cli import CLI
 from mininet.link import TCLink
 
-import os
-import time
+from os import system
 from typing import Dict, List
 
 
@@ -14,7 +13,7 @@ DOCKER_VOLUME: str = "/home/pmsdoliveira/workspace/gym-containernet/docker-volum
 
 def add_host(network: Containernet, name: str) -> None:
     if name not in network.keys():
-        os.system(f"sudo docker rm -f mn.{name}")
+        system(f"sudo docker rm -f mn.{name}")
         network.addDocker(name=name, dimage="iperf:latest", volumes=[f"{DOCKER_VOLUME}:/home/volume"])
 
 
@@ -42,22 +41,13 @@ def load_topology(network: Containernet, file: str) -> None:
 
 
 def start_containernet(topology_file: str) -> Containernet:
-    os.system("clear")
-    os.system("sudo mn -c")
+    system("clear")
+    system("sudo mn -c")
     network: Containernet = Containernet(controller=RemoteController, switch=OVSSwitch, link=TCLink, autoSetMacs=True, ipBase='10.0.0.0/8')
     load_topology(network, topology_file)
     network.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6653)
     network.start()
     return network
-
-
-def create_slice(network: Containernet, source: str, destination: str, port: int, duration: int, bw: int) -> None:
-    src: Host = network.get(source)
-    dst: Host = network.get(destination)
-    if src and dst:
-        dst.cmd(f"iperf3 -s -p {port} -i 1 >& /home/volume/{source}_{destination}_server.log &")
-        src.cmd(f"iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M >& /home/volume/{source}_{destination}_client.log &")
-        time.sleep(1)
 
 
 if __name__ == '__main__':
