@@ -15,7 +15,7 @@ class TopologyManagerAPI:
         self.network: Containernet = start_containernet(TOPOLOGY_FILE)
 
         self.active_pairs: List[Tuple[str, str]] = []
-        self.active_ports: List[int] = [6653]
+        self.active_ports: List[int] = [6653, 6654]
 
         self.active_pairs_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.active_pairs_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -26,7 +26,7 @@ class TopologyManagerAPI:
     def reset(self) -> None:
         system(f"rm -f {DOCKER_VOLUME}/*.log")
         self.active_pairs: List[Tuple[str, str]] = []
-        self.active_ports: List[int] = [6653]
+        self.active_ports: List[int] = [6653, 6654]
         self.active_pairs_connection.sendall("reset".encode('utf-8'))
 
     def create_slice(self, source: str, destination: str, duration: int, bw: float) -> None:

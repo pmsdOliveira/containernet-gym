@@ -76,15 +76,15 @@ def collect_data(env, policy, buffer, steps):
 
 
 if __name__ == '__main__':
-    num_iterations = 20000
-    initial_collect_steps = 100
-    collect_steps_per_iteration = 3
+    num_iterations = 500
+    initial_collect_steps = 32
+    collect_steps_per_iteration = 16
     replay_buffer_max_length = 100000
-    batch_size = 64
+    batch_size = 16
     learning_rate = 1e-3
-    log_interval = 200
-    num_eval_episodes = 10
-    eval_interval = 1000
+    log_interval = 5
+    num_eval_episodes = 1
+    eval_interval = 25
 
     env = suite_gym.load('containernet-v0')
     tf_env = tf_py_environment.TFPyEnvironment(env)
