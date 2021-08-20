@@ -12,10 +12,10 @@ from ryu.lib.packet import packet, arp
 from collections import defaultdict
 from datetime import datetime
 from operator import attrgetter
-import os
+from os import system
 import socket
 import time
-from typing import Any, DefaultDict, Dict, List, Tuple, Union
+from typing import Any, DefaultDict, Dict, List, Tuple
 
 
 TOPOLOGY_FILE = "topology.txt"
@@ -23,55 +23,56 @@ UPDATE_PERIOD = 5   # seconds
 BW_VARIANCE = 2000  # kbits
 
 # Custom types
-EndpointPair = Tuple[int, int]
-SwitchPortPair = Tuple[int, int]
-MacPair = Tuple[str, str]
-Match = Dict[Any, Union[int, str]]
-Path = List[Tuple[int, int, int]]
+EndpointPair = Tuple[int, int]  # (1, 2)
+SwitchPort = Tuple[int, int]  # (1, 2)
+MacPair = Tuple[str, str]  # ("00:00:00:00:00:01", "00:00:00:00:00:02")
+Path = List[Tuple[int, int, int]]  # [(1, 1, 4), (6, 1, 2), (2, 4, 1)]
 
 
-def load_topology(file: str) -> (Dict[str, str], Dict[str, SwitchPortPair], Dict[EndpointPair, int], Dict[EndpointPair, float]):
+def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float]):
+    name_mac: Dict[str, str] = {}
     ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
-    host_switch_port: Dict[str, SwitchPortPair] = {}
+    host_switch_port: Dict[str, SwitchPort] = {}
     adjacency: DefaultDict[EndpointPair, int] = defaultdict(lambda: 0)
     link_bw: Dict[EndpointPair, float] = {}
 
     with open(file, 'r') as topology:
         for line in topology.readlines()[2:]:
-            atts: List[str] = line.split()
-            if atts[0][0] != 'S':  # host connects to
+            cols: List[str] = line.split()
+            if cols[0][0] != 'S':  # host connects to
                 host_ip: str = '10.0.0.%s' % (len(host_switch_port) + 1)
                 hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
                 host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
+                name_mac[cols[0]] = host_mac
                 ip_mac[host_ip] = host_mac
-                if atts[1][0] == 'S':  # a switch
-                    idx: int = int(atts[1][1:])
+                if cols[1][0] == 'S':  # a switch
+                    idx: int = int(cols[1][1:])
                     switch_ports[idx] = switch_ports[idx] + 1 if switch_ports.get(idx) else 1
                     host_switch_port[host_mac] = (idx, switch_ports[idx])
             else:  # switch connects to
-                s1_idx: int = int(atts[0][1:])
-                if atts[1][0] == 'S':  # another switch
-                    s2_idx: int = int(atts[1][1:])
+                s1_idx: int = int(cols[0][1:])
+                if cols[1][0] == 'S':  # another switch
+                    s2_idx: int = int(cols[1][1:])
                     # necessary to match mininet ports
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     switch_ports[s2_idx] = switch_ports[s2_idx] + 1 if switch_ports.get(s2_idx) else 1
                     adjacency[s1_idx, s2_idx] = switch_ports[s1_idx]
                     adjacency[s2_idx, s1_idx] = switch_ports[s2_idx]
-                    link_bw[s1_idx, s2_idx] = float(atts[2])
-                    link_bw[s2_idx, s1_idx] = float(atts[2])
+                    link_bw[s1_idx, s2_idx] = float(cols[2])
+                    link_bw[s2_idx, s1_idx] = float(cols[2])
                 else:  # a host
                     hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
-    return ip_mac, host_switch_port, adjacency, link_bw
+    return name_mac, ip_mac, host_switch_port, adjacency, link_bw
 
 
 def request_stats(datapath: Datapath) -> None:
-    ofproto = datapath.ofproto
+    proto = datapath.ofproto
     parser = datapath.ofproto_parser
-    req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
+    req = parser.OFPPortStatsRequest(datapath, 0, proto.OFPP_ANY)
     datapath.send_msg(req)
 
 
@@ -104,14 +105,15 @@ class Controller(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args: Tuple, **kwargs: Dict[str, Any]) -> None:
-        os.system("clear")
+        system("clear")
         super(Controller, self).__init__(*args, **kwargs)
 
+        self.name_mac: Dict[str, str]
         self.ip_mac: Dict[str, str]
-        self.host_switch_port: Dict[str, SwitchPortPair]
+        self.host_switch_port: Dict[str, SwitchPort]
         self.adjacency: Dict[EndpointPair, int]
         self.bw: Dict[EndpointPair, float]
-        self.ip_mac, self.host_switch_port, self.adjacency, self.bw = load_topology(TOPOLOGY_FILE)
+        self.name_mac, self.ip_mac, self.host_switch_port, self.adjacency, self.bw = load_topology(TOPOLOGY_FILE)
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
@@ -121,50 +123,51 @@ class Controller(app_manager.RyuApp):
         self.tx_bytes: Dict[EndpointPair, int] = defaultdict(lambda: 0)
         self.clock: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
 
-        self.prev_paths: Dict[MacPair, Path] = {}
+        self.done_switches: List[int] = []
         self.paths: Dict[MacPair, Path] = {}
+        self.active_pairs: List[MacPair] = []
 
         self.topology_api_app = self
-        self.monitor_thread = hub.spawn(self.monitor)
+        self.monitor_bw_thread = hub.spawn(self.monitor_bw)
+        self.monitor_active_pairs_thread = hub.spawn(self.monitor_active_pairs)
 
-    def monitor(self) -> None:
-        # server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # server_socket.bind(('127.0.0.1', 6654))
-        # server_socket.listen()
-        # connection, _ = server_socket.accept()
-
+    def monitor_bw(self) -> None:
         while True:
             print(datetime.now().strftime("\n\n%H:%M:%S\n"))
-            for datapath in self.switch_datapath.values():
+            for switch, datapath in self.switch_datapath.items():
                 request_stats(datapath)
             hub.sleep(UPDATE_PERIOD)
 
-    def update_paths(self):
-        for (s1, s2), bw in self.available_bw.items():
-            print(f"{s1} -> {s2}: {self.prev_available_bw[s1, s2]:.3f} -> {bw:.3f} Kbps")
-            if abs(bw - self.prev_available_bw[s1, s2]) > BW_VARIANCE:  # only recalculate paths when BW changes > BW_VARIANCE
-                self.prev_available_bw = self.available_bw.copy()
-                self.paths = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw)
-                for src in self.host_switch_port.keys():
-                    for dst in self.host_switch_port.keys():
-                        if src != dst:
-                            if self.prev_paths.get((src, dst)):
-                                if self.prev_paths[src, dst] != self.paths[src, dst]:
-                                    uninstall_path(src, dst, self.prev_paths[src, dst], self.switch_datapath)
-                                    install_path(src, dst, self.paths[src, dst], self.switch_datapath)
-                            else:
-                                install_path(src, dst, self.paths[src, dst], self.switch_datapath)
-                            self.prev_paths[src, dst] = self.paths[src, dst]
-                break
-            else:
-                self.prev_available_bw[s1, s2] = self.available_bw[s1, s2]
+    def monitor_active_pairs(self) -> None:
+        active_pairs_client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        active_pairs_client_socket.connect(('127.0.0.1', 6654))
+        while True:
+            data: str = active_pairs_client_socket.recv(1024).decode('utf-8')
+            if data:
+                if data == "reset":
+                    self.active_pairs = []
+                else:
+                    active_pairs: List[MacPair] = [(self.name_mac[path.split('_')[0]], self.name_mac[path.split('_')[1]])
+                                                   for path in data.split(',')]
+                    if active_pairs != self.active_pairs:
+                        self.active_pairs = active_pairs.copy()
+
+    def update_paths(self) -> None:
+        print(f"Active paths: {self.active_pairs}")
+        new_paths: Dict[MacPair, Path] = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw, self.active_pairs)
+        for (src, dst) in new_paths.keys():
+            if self.paths.get(src, dst):  # on startup this dict will be empty
+                if new_paths[src, dst] != self.paths[src, dst]:
+                    uninstall_path(src, dst, self.paths[src, dst], self.switch_datapath)
+                    install_path(src, dst, new_paths[src, dst], self.switch_datapath)
+                    self.paths[src, dst] = new_paths[src, dst]
 
     @set_ev_cls(ofp_event.EventOFPStateChange, MAIN_DISPATCHER)
     def state_change_handler(self, ev):
         datapath = ev.datapath
         self.switch_datapath[datapath.id] = datapath
-        if len(self.switch_datapath) == len(set(s1 for (s1, s2) in self.adjacency.keys())):
-            self.paths = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw)
+        if len(self.switch_datapath) == len(set(s1 for (s1, s2) in self.adjacency.keys())):  # after all switches register
+            self.paths = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw, [])
             for src in self.host_switch_port.keys():
                 for dst in self.host_switch_port.keys():
                     if src != dst:
@@ -173,12 +176,12 @@ class Controller(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
         datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
+        proto = datapath.ofproto
         parser = datapath.ofproto_parser
         match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        mod = datapath.ofproto_parser.OFPFlowMod(datapath=datapath, match=match, cookie=0, command=ofproto.OFPFC_ADD,
+        actions = [parser.OFPActionOutput(proto.OFPP_CONTROLLER, proto.OFPCML_NO_BUFFER)]
+        inst = [parser.OFPInstructionActions(proto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = datapath.ofproto_parser.OFPFlowMod(datapath=datapath, match=match, cookie=0, command=proto.OFPFC_ADD,
                                                  idle_timeout=0, hard_timeout=0, priority=0, instructions=inst)
         datapath.send_msg(mod)
 
@@ -196,11 +199,16 @@ class Controller(app_manager.RyuApp):
                     self.tx_bytes[dpid, switch] = stat.tx_bytes
                     self.clock[dpid, switch] = time.time()
 
+        self.done_switches += [dpid]
+        if len(set(self.done_switches)) == len([sw for sw in self.switch_datapath.keys()]):  # all switches recalculated links' bw
+            self.update_paths()
+            self.done_switches = []
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev) -> None:
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
+        proto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
@@ -221,7 +229,7 @@ class Controller(app_manager.RyuApp):
                     out_port = p2
 
         data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+        if msg.buffer_id == proto.OFP_NO_BUFFER:
             data = msg.data
 
         if out_port:

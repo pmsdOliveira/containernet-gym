@@ -114,6 +114,7 @@ class ContainernetEnv(Env):
                     data = json.load(f)
             except json.decoder.JSONDecodeError:
                 print("JSONDecodeError: reopening file and loading JSON...")
+                sleep(0.5)
 
         if type == 1:
             average_bitrate: float = data["end"]["streams"][0]["sender"]["bits_per_second"] / 1000000.0
