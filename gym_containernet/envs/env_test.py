@@ -1,13 +1,11 @@
 import containernet_env
 from random import randint
-import time
 
-episodes = 5
+episodes = 50
 env = containernet_env.ContainernetEnv()
-time.sleep(5)
 
 for episode in range(1, episodes+1):
-    print("Starting episode...")
+    print(f"Starting episode {episode}...")
     env.reset()
     done = False
     score = 0

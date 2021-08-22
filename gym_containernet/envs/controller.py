@@ -14,6 +14,7 @@ from datetime import datetime
 from operator import attrgetter
 from os import system
 import socket
+from sys import byteorder
 import time
 from typing import Any, DefaultDict, Dict, List, Tuple
 
@@ -62,8 +63,11 @@ def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, Switc
                     link_bw[s1_idx, s2_idx] = float(cols[2])
                     link_bw[s2_idx, s1_idx] = float(cols[2])
                 else:  # a host
+                    host_ip: str = '10.0.0.%s' % (len(host_switch_port) + 1)
                     hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
+                    name_mac[cols[0]] = host_mac
+                    ip_mac[host_ip] = host_mac
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
     return name_mac, ip_mac, host_switch_port, adjacency, link_bw
@@ -142,15 +146,21 @@ class Controller(app_manager.RyuApp):
         active_pairs_client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         active_pairs_client_socket.connect(('127.0.0.1', 6654))
         while True:
-            data: str = active_pairs_client_socket.recv(1024).decode('utf-8')
+            size: int = int.from_bytes(active_pairs_client_socket.recv(4), byteorder)
+            data: str = active_pairs_client_socket.recv(size).decode('utf-8')
             if data:
-                if data == "reset":
+                if data == "none":
                     self.active_pairs = []
                 else:
-                    active_pairs: List[MacPair] = [(self.name_mac[path.split('_')[0]], self.name_mac[path.split('_')[1]])
-                                                   for path in data.split(',')]
-                    if active_pairs != self.active_pairs:
-                        self.active_pairs = active_pairs.copy()
+                    new_pairs = []
+                    for pair in data.split(','):
+                        elements = pair.split('_')
+                        # try:  # sometimes there is a connection error and this receives more data than it should
+                        new_pairs += [(self.name_mac[elements[0]], self.name_mac[elements[1]])]
+                        # except KeyError:
+                        #    new_pairs = []
+                    if new_pairs != self.active_pairs:
+                        self.active_pairs = new_pairs.copy()
 
     def update_paths(self) -> None:
         print(f"Active paths: {self.active_pairs}")
