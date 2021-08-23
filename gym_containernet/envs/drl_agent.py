@@ -86,7 +86,9 @@ for i in range(1, epochs + 1):
 
     total_reward_list.append(total_reward)
     print(f"Episode reward: {total_reward}")
-    print(f"Total rewards: {total_reward_list}\n\n\n")
+    with open('results.txt', 'a') as results_file:
+        for reward in total_reward_list:
+            results_file.write(f'{reward}\n')
 
     if epsilon > 0.1:
         epsilon -= (1 / epochs)

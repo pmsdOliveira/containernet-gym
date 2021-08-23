@@ -12,7 +12,6 @@ for episode in range(1, episodes+1):
 
     while not done:
         n_state, reward, done, info = env.step(randint(0, 1))
-        print(n_state, reward, done)
         score += reward
 
     print(f'Episode: {episode}, Score: {score}\n\n')

@@ -1,10 +1,10 @@
 from topology_manager import TopologyManager, DOCKER_VOLUME
+from template_generator import DURATION_TEMPLATES
 
-import datetime
+from bisect import bisect_left
 from gym import Env
 from gym.spaces import Box, Discrete
 import json
-from math import ceil
 import numpy as np
 from queue import Queue
 import random
@@ -15,13 +15,26 @@ from time import sleep
 from typing import Dict, List, Tuple
 
 
+ELASTIC_ARRIVAL_AVERAGE = 5
+INELASTIC_ARRIVAL_AVERAGE = 10
+DURATION_AVERAGE = 15
 CLIENT_SERVER_PAIRS = [('BS1', 'CU1'), ('BS1', 'CU2'), ('BS1', 'CU3'), ('BS1', 'CU4'),
                        ('BS2', 'CU1'), ('BS2', 'CU2'), ('BS2', 'CU3'), ('BS2', 'CU4'),
                        ('BS3', 'CU1'), ('BS3', 'CU2'), ('BS3', 'CU3'), ('BS3', 'CU4'),
                        ('BS4', 'CU1'), ('BS4', 'CU2'), ('BS4', 'CU3'), ('BS4', 'CU4')]
-ELASTIC_ARRIVAL_AVERAGE = 5
-INELASTIC_ARRIVAL_AVERAGE = 10
-DURATION_AVERAGE = 15
+
+
+def closest(values: List, number: float) -> int:
+    pos: int = bisect_left(values, number)
+    if pos == 0:
+        return values[0]
+    if pos == len(values):
+        return values[-1]
+    before: int = values[pos - 1]
+    after: int = values[pos]
+    if after - number < number - before:
+        return after
+    return before
 
 
 def json_from_log(client: str, server: str) -> Dict:
@@ -35,24 +48,18 @@ def json_from_log(client: str, server: str) -> Dict:
     return data
 
 
-def evaluate_elastic_slice(client: str, server: str, bw: float, price: float, data: Dict) -> float:
+def evaluate_elastic_slice(bw: float, price: float, data: Dict) -> float:
     average_bitrate: float = data["end"]["streams"][0]["sender"]["bits_per_second"] / 1000000.0
     if average_bitrate >= bw:
-        # print(f"--- REQUEST: Elastic | {average_bitrate} >= {bw} | {client} -> {server}")
         return 0.0
-
-    # print(f"--- REQUEST: Elastic | {average_bitrate} < {bw} | {client} -> {server}")
-    return - price / 4
+    return -price
 
 
-def evaluate_inelastic_slice(client: str, server: str, bw: float, price: float, data: Dict) -> float:
+def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
     worst_bitrate = min(interval["streams"][0]["bits_per_second"] for interval in data["intervals"]) / 1000000.0
     if worst_bitrate >= bw:
-        # print(f"--- REQUEST: Inelastic | {worst_bitrate} >= {bw} | {client} -> {server}")
         return 0.0
-
-    # print(f"--- REQUEST: Inelastic | {worst_bitrate} < {bw} | {client} -> {server}")
-    return - price / 2
+    return -price
 
 
 class ContainernetEnv(Env):
@@ -61,12 +68,21 @@ class ContainernetEnv(Env):
 
         self.observation_space: Box = Box(low=np.zeros(6, dtype=np.float32), high=np.full(6, 100.0, dtype=np.float32), dtype=np.float32)
         self.action_space: Discrete = Discrete(2)
-        self.state: np.ndarray = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)  # (n_elastic, n_inelastic, type, duration, bw, price/s)
+        self.state: np.ndarray = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
-        self.semaphore = False
         self.requests: int = 0
         self.max_requests: int = 16
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
+
+        self.elastic_request_templates = []
+        self.inelastic_request_templates = []
+        with open('request_templates.txt', 'r') as request_templates:
+            for template in request_templates.readlines()[2:]:
+                slice_type, duration, bw, price = template.split()
+                if slice_type == 'e':
+                    self.elastic_request_templates += [(int(duration), float(bw), float(price))]
+                else:
+                    self.inelastic_request_templates += [(int(duration), float(bw), float(price))]
 
         self.active_ports: List[int] = []
         self.active_pairs: List[Tuple[str, str]] = []
@@ -81,7 +97,6 @@ class ContainernetEnv(Env):
         self.backend.clear_logs()
         self.state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
-        self.semaphore = True
         self.requests = 0
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
 
@@ -97,11 +112,10 @@ class ContainernetEnv(Env):
         return self.state
 
     def step(self, action) -> (object, float, bool, dict):
-        # print(datetime.datetime.now().strftime("\n%H:%M:%S:%f"))
         sleep(1)
         request = self.requests_queue.get(block=True)
 
-        self.state = list(self.state)  # convert ndarray to list
+        self.state = list(self.state)  # convert numpy array to list
         self.state[2] = request["type"]
         self.state[3] = request["duration"]
         self.state[4] = request["bw"]
@@ -115,7 +129,6 @@ class ContainernetEnv(Env):
             reward += request["departed"]["reward"]
 
             self.active_pairs.remove((request["departed"]["client"], request["departed"]["server"]))
-            # print(f"Active pairs: {self.active_pairs}")
 
             data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs) if len(self.active_pairs) > 0 else 'none'
             self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
@@ -123,7 +136,6 @@ class ContainernetEnv(Env):
 
             if self.requests >= self.max_requests and len(self.active_pairs) == 0:
                 done = True
-                #print("Finishing episode...")
         else:
             self.requests += 1
             if action == 1 and len(self.active_pairs) < len(CLIENT_SERVER_PAIRS):
@@ -140,7 +152,6 @@ class ContainernetEnv(Env):
                 print("Rejected request")
                 if self.requests >= self.max_requests and len(self.active_pairs) == 0:  # for when all requests are rejected
                     done = True
-                    # print("Finishing episode...")
 
         print(np.array(self.state, dtype=np.float32))
         return np.array(self.state, dtype=np.float32), reward, done, {}
@@ -153,31 +164,30 @@ class ContainernetEnv(Env):
         data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs)
         self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
         self.active_pairs_connection.sendall(data.encode('utf-8'))
-        # print(f"Active pairs: {self.active_pairs}")
         port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
         self.active_ports += [port]
         self.backend.slice(client, server, port, self.state[3], self.state[4])
         Thread(target=self.slice_evaluator, args=(client, server, self.state[2], self.state[3], self.state[4], price)).start()
 
-    def request_generator(self, type: int) -> None:
-        if type not in [1, 2]:
+    def request_generator(self, slice_type: int) -> None:
+        if slice_type not in [1, 2]:
             return
-        average: float = ELASTIC_ARRIVAL_AVERAGE if type == 1 else INELASTIC_ARRIVAL_AVERAGE
         while self.requests < self.max_requests:
-            arrival: float = np.random.poisson(average)
+            arrival: float = np.random.poisson(ELASTIC_ARRIVAL_AVERAGE if slice_type == 1 else INELASTIC_ARRIVAL_AVERAGE)
             sleep(arrival)
-            duration: int = ceil(np.random.exponential(DURATION_AVERAGE))
-            bw: float = np.random.uniform(low=1.0, high=100.0)
-            price: float = np.random.uniform(low=0.01, high=0.5) if type == 1 else np.random.uniform(low=0.5, high=1.0)
-            if self.requests < self.max_requests:  # ensures req isn't created if semaphore switched inside loop
-                # print(f"+++ REQUEST ({self.requests + 1}): {'Elastic' if type == 1 else 'Inelastic'} | {duration}s | {bw:.3f} Mb/s | {price:.2f} euros/s")
-                self.requests_queue.put(dict(type=type, duration=duration, bw=bw, price=price, departed={}))
+            if self.requests < self.max_requests:  # ensures req isn't created if new req is created while inside loop
+                duration: int = closest(DURATION_TEMPLATES, np.random.exponential(DURATION_AVERAGE))
+                if slice_type == 1:
+                    _, bw, price = random.choice([template for template in self.elastic_request_templates if template[0] == duration])
+                else:
+                    _, bw, price = random.choice([template for template in self.inelastic_request_templates if template[0] == duration])
+                self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw), price=float(price), departed={}))
 
-    def slice_evaluator(self, client: str, server: str, type: int, duration: int, bw: float, price: float) -> None:
-        if type not in [1, 2]:
+    def slice_evaluator(self, client: str, server: str, slice_type: int, duration: int, bw: float, price: float) -> None:
+        if slice_type not in [1, 2]:
             return
         sleep(duration)
         data: Dict = json_from_log(client, server)
-        reward: float = evaluate_elastic_slice(client, server, bw, price, data) if type == 1 else evaluate_inelastic_slice(client, server, bw, price, data)
-        departed: Dict = dict(type=1 if type == 1 else 2, reward=reward, client=client, server=server)
+        reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
+        departed: Dict = dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server)
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0, departed=departed))
