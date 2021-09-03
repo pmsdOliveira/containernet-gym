@@ -50,19 +50,19 @@ def json_from_log(client: str, server: str) -> Dict:
 
 def evaluate_elastic_slice(bw: float, price: float, data: Dict) -> float:
     average_bitrate: float = data["end"]["streams"][0]["sender"]["bits_per_second"] / 1000000.0
-    if average_bitrate >= bw:
+    if average_bitrate >= bw - bw * 0.05:
         return 0.0
-    return -price
+    return -price / 2
 
 
 def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
     worst_bitrate = min(interval["streams"][0]["bits_per_second"] for interval in data["intervals"]) / 1000000.0
-    if worst_bitrate >= bw:
+    if worst_bitrate >= bw - bw * 0.05:
         return 0.0
     return -price
 
 
-class ContainernetEnv(Env):
+class PathSelectionEnv(Env):
     def __init__(self):
         self.backend: TopologyManager = TopologyManager()
 
@@ -71,7 +71,7 @@ class ContainernetEnv(Env):
         self.state: np.ndarray = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
         self.requests: int = 0
-        self.max_requests: int = 16
+        self.max_requests: int = 12
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
 
         self.elastic_request_templates = []
@@ -148,6 +148,7 @@ class ContainernetEnv(Env):
                     self.state[0] += 1
                 elif self.state[2] == 2:
                     self.state[1] += 1
+
             else:
                 print("Rejected request")
                 if self.requests >= self.max_requests and len(self.active_pairs) == 0:  # for when all requests are rejected
@@ -191,3 +192,45 @@ class ContainernetEnv(Env):
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
         departed: Dict = dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server)
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0, departed=departed))
+
+    # 1 -> ponto de entrada
+    # 2 -> ponto de saída
+    # 3 -> número do caminho utilizado
+    # 4 -> largura de banda do bottleneck do caminho utilizado
+
+    # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
+    # NOTA: um slice pode utilizar múltiplas BSs e MECSs/CSs
+    # TODO: trocar a ordem de como sao criados os estados
+    # TODO: um iperf ter uma LB flutuante
+    # TODO: pré-computar 4 caminhos mais curtos entre cada par
+
+    # 1 -> número de slices elásticas
+    # 2 -> número de slices inelásticas
+    # 3 -> base station de entrada
+    # 4 -> computing station de saída
+    # 5 -> caminho entre a BS e a CS
+    # 6 -> caminho em uso (0 ou LB em uso)
+
+    # 1 slices cada
+    # Elástica: BS0, BS2 -> CU1, CU2
+    # 4 caminhos mais curtos entre cada par
+    # caminho 0 -> 20Mb, 1 -> 15Mb, 2 -> 10Mb, 3 -> 20Mb
+    # Inelástica: BS1, BS3 -> CU0, CU3
+    # 4 caminhos mais curtos entre cada par
+    # caminho 0 -> 40Mb, 1 -> 30Mb, 2 -> 20Mb, 3 -> 40Mb
+
+
+    # episode: 16 accepted requests
+
+    # [n_elastic, n_inelastic, requested_slice_type, duration, bw, price, network_occupation]
+    # reward: price * duration when slice is accepted,
+
+    # self.state[0][1][0] = 20
+    # self.state[0][1][1] = 15
+    # self.state[0][1][2] = 10
+    # self.state[0][1][3] = 20
+    # self.state[0][2][0] = 30
+    # self.state[0][2][1] = 5
+    # self.state[0][2][2] = 15
+    # self.state[0][2][3] = 25
+    # reward: quanto maior a LB livre após alocação, maior a reward (network_occupation)

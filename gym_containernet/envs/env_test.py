@@ -1,8 +1,8 @@
-import containernet_env
+import slice_admission_env
 from random import randint
 
 episodes = 50
-env = containernet_env.ContainernetEnv()
+env = slice_admission_env.ContainernetEnv()
 
 for episode in range(1, episodes+1):
     print(f"Starting episode {episode}...")

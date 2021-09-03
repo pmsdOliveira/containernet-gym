@@ -1,1 +1,2 @@
-from gym_containernet.envs.containernet_env import ContainernetEnv
+from gym_containernet.envs.slice_admission_env import SliceAdmissionEnv
+from gym_containernet.envs.path_selection_env import PathSelectionEnv

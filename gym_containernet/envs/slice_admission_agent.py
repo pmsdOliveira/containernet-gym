@@ -8,16 +8,22 @@ from collections import deque
 import copy
 
 l1 = 6
-l2 = 150
-l3 = 100
-l4 = 2
+l2 = 100
+l3 = 500
+l4 = 200
+l5 = 50
+l6 = 2
 
 q_net = torch.nn.Sequential(
     torch.nn.Linear(l1, l2),
     torch.nn.ReLU(),
     torch.nn.Linear(l2, l3),
     torch.nn.ReLU(),
-    torch.nn.Linear(l3, l4)
+    torch.nn.Linear(l3, l4),
+    torch.nn.ReLU(),
+    torch.nn.Linear(l4, l5),
+    torch.nn.ReLU(),
+    torch.nn.Linear(l5, l6),
 )
 
 target_net = copy.deepcopy(q_net)
@@ -33,12 +39,12 @@ optimizer = torch.optim.Adam(q_net.parameters(), lr=learning_rate)
 losses = []
 total_reward_list = []
 epochs = 1000
-mem_size = 256
-batch_size = 64
-sync_freq = 358
+mem_size = 512
+batch_size = 128
+sync_freq = 256
 replay = deque(maxlen=mem_size)
 
-env = gym.make('containernet-v0')
+env = gym.make('slice-admission-v0')
 
 for i in range(1, epochs + 1):
     print(f"Epoch {i}:")
@@ -85,10 +91,9 @@ for i in range(1, epochs + 1):
         total_reward += reward
 
     total_reward_list.append(total_reward)
-    print(f"Episode reward: {total_reward}")
+    print(f"Episode reward: {total_reward}\n\n")
     with open('results.txt', 'a') as results_file:
-        for reward in total_reward_list:
-            results_file.write(f'{reward}\n')
+        results_file.write(f'{total_reward}\n')
 
     if epsilon > 0.1:
         epsilon -= (1 / epochs)
