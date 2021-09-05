@@ -44,21 +44,25 @@ def json_from_log(client: str, server: str) -> Dict:
             with open(f"{DOCKER_VOLUME}/{client}_{server}.log", 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
-            sleep(0.2)
+            sleep(0.1)
     return data
 
 
 def evaluate_elastic_slice(bw: float, price: float, data: Dict) -> float:
     average_bitrate: float = data["end"]["streams"][0]["sender"]["bits_per_second"] / 1000000.0
     if average_bitrate >= bw - bw * 0.05:
+        print(f"Finished elastic slice {average_bitrate} >= {bw}")
         return 0.0
+    print(f"Failed elastic slice {average_bitrate} < {bw}")
     return -price / 2
 
 
 def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
     worst_bitrate = min(interval["streams"][0]["bits_per_second"] for interval in data["intervals"]) / 1000000.0
     if worst_bitrate >= bw - bw * 0.05:
+        print(f"Finished inelastic slice {worst_bitrate} >= {bw}")
         return 0.0
+    print(f"Finished inelastic slice {worst_bitrate} < {bw}")
     return -price
 
 
@@ -73,6 +77,7 @@ class SliceAdmissionEnv(Env):
         self.requests: int = 0
         self.max_requests: int = 12
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
+        self.departed_info_queue: Queue = Queue(maxsize=self.max_requests)
 
         self.elastic_request_templates = []
         self.inelastic_request_templates = []
@@ -99,6 +104,7 @@ class SliceAdmissionEnv(Env):
 
         self.requests = 0
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
+        self.departed_info_queue: Queue = Queue(maxsize=self.max_requests)
 
         self.active_ports: List[int] = []
         self.active_pairs: List[Tuple[str, str]] = []
@@ -108,38 +114,25 @@ class SliceAdmissionEnv(Env):
         Thread(target=self.request_generator, args=(1,)).start()
         Thread(target=self.request_generator, args=(2,)).start()
 
-        print(self.state)
-        return self.state
-
-    def step(self, action) -> (object, float, bool, dict):
-        sleep(1)
         request = self.requests_queue.get(block=True)
-
-        self.state = list(self.state)  # convert numpy array to list
         self.state[2] = request["type"]
         self.state[3] = request["duration"]
         self.state[4] = request["bw"]
         self.state[5] = request["price"]
 
+        print(self.state)
+        return self.state
+
+    def step(self, action) -> (object, float, bool, dict):
+        self.state = list(self.state)  # convert numpy array to list
+
         reward: float = 0.0
         done: bool = False
 
-        if self.state[2] == 0:  # slice departure
-            self.state[request["departed"]["type"] - 1] -= 1
-            reward += request["departed"]["reward"]
-
-            self.active_pairs.remove((request["departed"]["client"], request["departed"]["server"]))
-
-            data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs) if len(self.active_pairs) > 0 else 'none'
-            self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
-            self.active_pairs_connection.sendall(data.encode('utf-8'))
-
-            if self.requests >= self.max_requests and len(self.active_pairs) == 0:
-                done = True
-        else:
+        if self.state[2] != 0:  # slice arrival
             self.requests += 1
-            if action == 1 and len(self.active_pairs) < len(CLIENT_SERVER_PAIRS):
-                client, server = random.choice([pair for pair in CLIENT_SERVER_PAIRS if pair not in self.active_pairs])
+            if action == 1:
+                client, server = random.choice(CLIENT_SERVER_PAIRS)
                 print(f"Accepted request")
                 reward: float = self.state[3] * self.state[5]
                 self.create_slice(client, server, reward)
@@ -153,8 +146,31 @@ class SliceAdmissionEnv(Env):
                 print("Rejected request")
                 if self.requests >= self.max_requests and len(self.active_pairs) == 0:  # for when all requests are rejected
                     done = True
+        else:  # slice departure
+            departed = self.departed_info_queue.get()
+            self.state[departed["type"] - 1] -= 1
+            reward += departed["reward"]
 
-        print(np.array(self.state, dtype=np.float32))
+            self.active_pairs.remove((departed["client"], departed["server"]))
+
+            data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs) if len(self.active_pairs) > 0 else 'none'
+            self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
+            self.active_pairs_connection.sendall(data.encode('utf-8'))
+
+            if self.requests >= self.max_requests and len(self.active_pairs) == 0:
+                done = True
+
+        if self.requests < self.max_requests:
+            request = self.requests_queue.get(block=True)
+            self.state[2] = request["type"]
+            self.state[3] = request["duration"]
+            self.state[4] = request["bw"]
+            self.state[5] = request["price"]
+        else:
+            done = True
+
+        self.state = np.array(self.state, dtype=np.float32)
+        print(self.state)
         return np.array(self.state, dtype=np.float32), reward, done, {}
 
     def render(self, mode='human') -> None:
@@ -182,7 +198,7 @@ class SliceAdmissionEnv(Env):
                     _, bw, price = random.choice([template for template in self.elastic_request_templates if template[0] == duration])
                 else:
                     _, bw, price = random.choice([template for template in self.inelastic_request_templates if template[0] == duration])
-                self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw), price=float(price), departed={}))
+                self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw), price=float(price)))
 
     def slice_evaluator(self, client: str, server: str, slice_type: int, duration: int, bw: float, price: float) -> None:
         if slice_type not in [1, 2]:
@@ -190,8 +206,8 @@ class SliceAdmissionEnv(Env):
         sleep(duration)
         data: Dict = json_from_log(client, server)
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
-        departed: Dict = dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server)
-        self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0, departed=departed))
+        self.departed_info_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server))
+        self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0))
 
     # 1 -> ponto de entrada
     # 2 -> ponto de saída
@@ -199,10 +215,10 @@ class SliceAdmissionEnv(Env):
     # 4 -> largura de banda do bottleneck do caminho utilizado
 
     # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
-    # NOTA: um slice pode utilizar múltiplas BSs e MECSs/CSs
     # TODO: trocar a ordem de como sao criados os estados
-    # TODO: um iperf ter uma LB flutuante
     # TODO: pré-computar 4 caminhos mais curtos entre cada par
+    # TODO: um slice pode utilizar múltiplas BSs e MECSs/CSs
+    # TODO: um iperf ter uma LB flutuante
 
     # 1 -> número de slices elásticas
     # 2 -> número de slices inelásticas
@@ -220,7 +236,7 @@ class SliceAdmissionEnv(Env):
     # caminho 0 -> 40Mb, 1 -> 30Mb, 2 -> 20Mb, 3 -> 40Mb
 
 
-    # episode: 16 accepted requests
+    # episode: 12 accepted requests
 
     # [n_elastic, n_inelastic, requested_slice_type, duration, bw, price, network_occupation]
     # reward: price * duration when slice is accepted,
