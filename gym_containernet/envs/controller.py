@@ -1,5 +1,3 @@
-import path_calculator
-
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
@@ -11,17 +9,18 @@ from ryu.lib.packet import packet, arp
 
 from collections import defaultdict
 from datetime import datetime
+import networkx as nx
 from operator import attrgetter
 from os import system
 import socket
 from sys import byteorder
 import time
-from typing import Any, DefaultDict, Dict, List, Tuple
+from typing import Any, DefaultDict, Dict, List, Tuple, Union
 
 
 TOPOLOGY_FILE = "topology.txt"
+NUMBER_OF_PATHS = 4
 UPDATE_PERIOD = 5   # seconds
-BW_VARIANCE = 2000  # kbits
 
 # Custom types
 EndpointPair = Tuple[int, int]  # (1, 2)
@@ -30,29 +29,36 @@ MacPair = Tuple[str, str]  # ("00:00:00:00:00:01", "00:00:00:00:00:02")
 Path = List[Tuple[int, int, int]]  # [(1, 1, 4), (6, 1, 2), (2, 4, 1)]
 
 
-def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float]):
-    name_mac: Dict[str, str] = {}
+def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float], nx.Graph):
+    mac_name: Dict[str, str] = {}
     ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
     host_switch_port: Dict[str, SwitchPort] = {}
     adjacency: DefaultDict[EndpointPair, int] = defaultdict(lambda: 0)
     link_bw: Dict[EndpointPair, float] = {}
+    graph: nx.Graph = nx.Graph()
 
     with open(file, 'r') as topology:
         for line in topology.readlines()[2:]:
             cols: List[str] = line.split()
             if cols[0][0] != 'S':  # host connects to
-                host_ip: str = '10.0.0.%s' % (len(host_switch_port) + 1)
-                hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
+                hexadecimal: str = f'{len(host_switch_port) + 1:012X}'
                 host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
-                name_mac[cols[0]] = host_mac
-                ip_mac[host_ip] = host_mac
+                mac_name[host_mac] = cols[0]
+                if host_mac not in graph:
+                    graph.add_node(host_mac)
+                ip_mac[f'10.0.0.{len(host_switch_port) + 1}'] = host_mac
                 if cols[1][0] == 'S':  # a switch
                     idx: int = int(cols[1][1:])
                     switch_ports[idx] = switch_ports[idx] + 1 if switch_ports.get(idx) else 1
                     host_switch_port[host_mac] = (idx, switch_ports[idx])
+                    if idx not in graph:
+                        graph.add_node(idx)
+                    graph.add_edge(host_mac, idx)
             else:  # switch connects to
                 s1_idx: int = int(cols[0][1:])
+                if s1_idx not in graph:
+                    graph.add_node(s1_idx)
                 if cols[1][0] == 'S':  # another switch
                     s2_idx: int = int(cols[1][1:])
                     # necessary to match mininet ports
@@ -62,15 +68,75 @@ def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, Switc
                     adjacency[s2_idx, s1_idx] = switch_ports[s2_idx]
                     link_bw[s1_idx, s2_idx] = float(cols[2])
                     link_bw[s2_idx, s1_idx] = float(cols[2])
+                    if s2_idx not in graph:
+                        graph.add_node(s2_idx)
+                    graph.add_edge(s1_idx, s2_idx, weight=cols[2])
                 else:  # a host
-                    host_ip: str = '10.0.0.%s' % (len(host_switch_port) + 1)
-                    hexadecimal: str = '{0:012x}'.format(len(host_switch_port) + 1)
+                    hexadecimal: str = f'{len(host_switch_port) + 1:012X}'
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
-                    name_mac[cols[0]] = host_mac
-                    ip_mac[host_ip] = host_mac
+                    mac_name[host_mac] = cols[1]
+                    if host_mac not in graph:
+                        graph.add_node(host_mac)
+                    ip_mac[f'10.0.0.{len(host_switch_port) + 1}'] = host_mac
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
-    return name_mac, ip_mac, host_switch_port, adjacency, link_bw
+                    graph.add_edge(host_mac, s1_idx, weight=cols[2])
+    return mac_name, ip_mac, host_switch_port, adjacency, link_bw, graph
+
+
+def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Dict[str, SwitchPort], adjacency: Dict[EndpointPair, int]
+                 ) -> Dict[MacPair, List[Path]]:
+    base_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'B']
+    computing_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'C']
+
+    all_paths = {}
+    for bs in base_stations:
+        for cs in computing_stations:
+            all_paths[bs, cs] = sorted(list(nx.all_simple_paths(graph, bs, cs)), key=lambda x: len(x))[:NUMBER_OF_PATHS]
+            all_paths[cs, bs] = sorted(list(nx.all_simple_paths(graph, cs, bs)), key=lambda x: len(x))[:NUMBER_OF_PATHS]
+
+    for paths in all_paths.values():
+        for path_idx, path in enumerate(paths):
+            installable_path: Path = []
+            (switch, in_port) = host_switch_port[path[0]]
+            if len(path) == 3:  # only goes through one switch
+                out_port: int = host_switch_port[path[2]][1]
+                installable_path.append((switch, in_port, out_port))
+            else:
+                out_port: int = adjacency[path[1], path[2]]
+                installable_path.append((switch, in_port, out_port))
+                for i in range(1, len(path) - 3):
+                    section: List[Union[str, int]] = path[i:i + 3]
+                    switch: int = section[1]
+                    in_port: int = adjacency[switch, section[0]]
+                    out_port: int = adjacency[switch, section[2]]
+                    installable_path.append((switch, in_port, out_port))
+                (switch, out_port) = host_switch_port[path[-1]]
+                in_port: int = adjacency[path[1], path[2]]
+                installable_path.append((switch, in_port, out_port))
+            paths[path_idx] = installable_path
+    return all_paths
+
+
+def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> Dict[MacPair, List[float]]:
+    bottlenecks: Dict[MacPair, Union[List[None], List[float]]] = defaultdict(lambda: NUMBER_OF_PATHS * [None])
+    for (src, dst), path_list in paths.items():
+        for path_idx, path in enumerate(path_list):
+            switches = [switch for (switch, in_port, out_port) in path]
+            pairs = [(switches[i], switches[i + 1]) for i in range(len(switches) - 1)]
+            bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair).get('weight', 0.0) for pair in pairs)
+    return bottlenecks
+
+
+def select_best_paths(paths: Dict[MacPair, List[Path]], bottlenecks: Dict[MacPair, List[float]]) -> Dict[MacPair, Path]:
+    best_bottleneck: float = float("Inf")
+    best_paths: Dict[MacPair, Path] = {}
+    for (src, dst), path_list in paths.items():
+        for path_idx, path in enumerate(path_list):
+            if bottlenecks[src, dst][path_idx] < best_bottleneck:
+                best_bottleneck = bottlenecks[src, dst][path_idx]
+                best_paths[src, dst] = path
+    return best_paths
 
 
 def request_stats(datapath: Datapath) -> None:
@@ -112,12 +178,17 @@ class Controller(app_manager.RyuApp):
         system("clear")
         super(Controller, self).__init__(*args, **kwargs)
 
-        self.name_mac: Dict[str, str]
+        self.mac_name: Dict[str, str]
         self.ip_mac: Dict[str, str]
         self.host_switch_port: Dict[str, SwitchPort]
         self.adjacency: Dict[EndpointPair, int]
         self.bw: Dict[EndpointPair, float]
-        self.name_mac, self.ip_mac, self.host_switch_port, self.adjacency, self.bw = load_topology(TOPOLOGY_FILE)
+        self.graph: nx.Graph
+        self.mac_name, self.ip_mac, self.host_switch_port, self.adjacency, \
+            self.bw, self.graph = load_topology(TOPOLOGY_FILE)
+
+        self.paths: Dict[MacPair, List[Path]] = create_paths(self.graph, self.mac_name, self.host_switch_port, self.adjacency)
+        self.bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
@@ -128,60 +199,23 @@ class Controller(app_manager.RyuApp):
         self.clock: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
 
         self.done_switches: List[int] = []
-        self.paths: Dict[MacPair, Path] = {}
-        self.active_pairs: List[MacPair] = []
+        self.bw_connection: socket = None
 
         self.topology_api_app = self
         self.monitor_bw_thread = hub.spawn(self.monitor_bw)
-        self.monitor_active_pairs_thread = hub.spawn(self.monitor_active_pairs)
 
     def monitor_bw(self) -> None:
+        bw_server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        bw_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        bw_server_socket.bind(('127.0.0.1', 6654))
+        bw_server_socket.listen()
+        self.bw_connection, _ = bw_server_socket.accept()
+
         while True:
             print(datetime.now().strftime("\n\n%H:%M:%S\n"))
             for switch, datapath in self.switch_datapath.items():
                 request_stats(datapath)
             hub.sleep(UPDATE_PERIOD)
-
-    def monitor_active_pairs(self) -> None:
-        active_pairs_client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        active_pairs_client_socket.connect(('127.0.0.1', 6654))
-        while True:
-            size: int = int.from_bytes(active_pairs_client_socket.recv(4), byteorder)
-            data: str = active_pairs_client_socket.recv(size).decode('utf-8')
-            if data:
-                if data == "none":
-                    self.active_pairs = []
-                else:
-                    new_pairs = []
-                    for pair in data.split(','):
-                        elements = pair.split('_')
-                        # try:  # sometimes there is a connection error and this receives more data than it should
-                        new_pairs += [(self.name_mac[elements[0]], self.name_mac[elements[1]])]
-                        # except KeyError:
-                        #    new_pairs = []
-                    if new_pairs != self.active_pairs:
-                        self.active_pairs = new_pairs.copy()
-
-    def update_paths(self) -> None:
-        print(f"Active paths: {self.active_pairs}")
-        new_paths: Dict[MacPair, Path] = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw, self.active_pairs)
-        for (src, dst) in new_paths.keys():
-            if self.paths.get(src, dst):  # on startup this dict will be empty
-                if new_paths[src, dst] != self.paths[src, dst]:
-                    uninstall_path(src, dst, self.paths[src, dst], self.switch_datapath)
-                    install_path(src, dst, new_paths[src, dst], self.switch_datapath)
-                    self.paths[src, dst] = new_paths[src, dst]
-
-    @set_ev_cls(ofp_event.EventOFPStateChange, MAIN_DISPATCHER)
-    def state_change_handler(self, ev):
-        datapath = ev.datapath
-        self.switch_datapath[datapath.id] = datapath
-        if len(self.switch_datapath) == len(set(s1 for (s1, s2) in self.adjacency.keys())):  # after all switches register
-            self.paths = path_calculator.best_paths(self.host_switch_port, self.adjacency, self.available_bw, [])
-            for src in self.host_switch_port.keys():
-                for dst in self.host_switch_port.keys():
-                    if src != dst:
-                        install_path(src, dst, self.paths[src, dst], self.switch_datapath)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
@@ -194,6 +228,18 @@ class Controller(app_manager.RyuApp):
         mod = datapath.ofproto_parser.OFPFlowMod(datapath=datapath, match=match, cookie=0, command=proto.OFPFC_ADD,
                                                  idle_timeout=0, hard_timeout=0, priority=0, instructions=inst)
         datapath.send_msg(mod)
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, MAIN_DISPATCHER)
+    def state_change_handler(self, ev):
+        datapath = ev.datapath
+        self.switch_datapath[datapath.id] = datapath
+        if len(self.switch_datapath) == len(set(s1 for (s1, s2) in self.adjacency.keys())):  # after all switches register
+            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+            paths: Dict[MacPair, Path] = select_best_paths(self.paths, bottlenecks)
+            for src in self.host_switch_port.keys():
+                for dst in self.host_switch_port.keys():
+                    if src != dst:
+                        install_path(src, dst, paths[src, dst], self.switch_datapath)
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev) -> None:
@@ -211,7 +257,22 @@ class Controller(app_manager.RyuApp):
 
         self.done_switches += [dpid]
         if len(set(self.done_switches)) == len([sw for sw in self.switch_datapath.keys()]):  # all switches recalculated links' bw
-            self.update_paths()
+            for (src, dst), bw in self.available_bw.items():
+                self.graph[src][dst]['weight'] = bw
+
+            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+
+            data: str = ''
+            for (src, dst), bottleneck_list in bottlenecks.items():
+                data += f'{self.mac_name[src]}_{self.mac_name[dst]}=' \
+                        f'{",".join(str(bottleneck) for bottleneck in bottleneck_list)}\n'
+            self.bw_connection.sendall(len(data).to_bytes(16, byteorder))
+            self.bw_connection.sendall(data.encode('utf-8'))
+
+            # TODO: Update best path for each (src, dst) pair
+            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+            paths: Dict[MacPair, Path] = select_best_paths(self.paths, bottlenecks)
+
             self.done_switches = []
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)

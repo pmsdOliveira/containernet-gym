@@ -8,11 +8,9 @@ import json
 import numpy as np
 from queue import Queue
 import random
-import socket
-from sys import byteorder
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 ELASTIC_ARRIVAL_AVERAGE = 5
@@ -90,12 +88,6 @@ class SliceAdmissionEnv(Env):
                     self.inelastic_request_templates += [(int(duration), float(bw), float(price))]
 
         self.active_ports: List[int] = []
-        self.active_pairs: List[Tuple[str, str]] = []
-        self.active_pairs_server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.active_pairs_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.active_pairs_server_socket.bind(('127.0.0.1', 6654))
-        self.active_pairs_server_socket.listen()
-        self.active_pairs_connection, _ = self.active_pairs_server_socket.accept()
         sleep(5)  # give the controller time to build starting paths
 
     def reset(self) -> object:
@@ -107,9 +99,6 @@ class SliceAdmissionEnv(Env):
         self.departed_info_queue: Queue = Queue(maxsize=self.max_requests)
 
         self.active_ports: List[int] = []
-        self.active_pairs: List[Tuple[str, str]] = []
-        self.active_pairs_connection.sendall(len('none').to_bytes(4, byteorder))
-        self.active_pairs_connection.sendall('none'.encode('utf-8'))
 
         Thread(target=self.request_generator, args=(1,)).start()
         Thread(target=self.request_generator, args=(2,)).start()
@@ -144,20 +133,14 @@ class SliceAdmissionEnv(Env):
 
             else:
                 print("Rejected request")
-                if self.requests >= self.max_requests and len(self.active_pairs) == 0:  # for when all requests are rejected
+                if self.requests >= self.max_requests:  # for when all requests are rejected
                     done = True
         else:  # slice departure
             departed = self.departed_info_queue.get()
             self.state[departed["type"] - 1] -= 1
             reward += departed["reward"]
 
-            self.active_pairs.remove((departed["client"], departed["server"]))
-
-            data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs) if len(self.active_pairs) > 0 else 'none'
-            self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
-            self.active_pairs_connection.sendall(data.encode('utf-8'))
-
-            if self.requests >= self.max_requests and len(self.active_pairs) == 0:
+            if self.requests >= self.max_requests:
                 done = True
 
         if self.requests < self.max_requests:
@@ -177,10 +160,6 @@ class SliceAdmissionEnv(Env):
         pass
 
     def create_slice(self, client: str, server: str, price: float) -> None:
-        self.active_pairs += [(client, server)]
-        data: str = ','.join(f"{pair[0]}_{pair[1]}" for pair in self.active_pairs)
-        self.active_pairs_connection.sendall(len(data).to_bytes(4, byteorder))
-        self.active_pairs_connection.sendall(data.encode('utf-8'))
         port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
         self.active_ports += [port]
         self.backend.slice(client, server, port, self.state[3], self.state[4])
@@ -209,44 +188,8 @@ class SliceAdmissionEnv(Env):
         self.departed_info_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server))
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0))
 
-    # 1 -> ponto de entrada
-    # 2 -> ponto de saída
-    # 3 -> número do caminho utilizado
-    # 4 -> largura de banda do bottleneck do caminho utilizado
-
     # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
     # TODO: trocar a ordem de como sao criados os estados
     # TODO: pré-computar 4 caminhos mais curtos entre cada par
     # TODO: um slice pode utilizar múltiplas BSs e MECSs/CSs
     # TODO: um iperf ter uma LB flutuante
-
-    # 1 -> número de slices elásticas
-    # 2 -> número de slices inelásticas
-    # 3 -> base station de entrada
-    # 4 -> computing station de saída
-    # 5 -> caminho entre a BS e a CS
-    # 6 -> caminho em uso (0 ou LB em uso)
-
-    # 1 slices cada
-    # Elástica: BS0, BS2 -> CU1, CU2
-    # 4 caminhos mais curtos entre cada par
-    # caminho 0 -> 20Mb, 1 -> 15Mb, 2 -> 10Mb, 3 -> 20Mb
-    # Inelástica: BS1, BS3 -> CU0, CU3
-    # 4 caminhos mais curtos entre cada par
-    # caminho 0 -> 40Mb, 1 -> 30Mb, 2 -> 20Mb, 3 -> 40Mb
-
-
-    # episode: 12 accepted requests
-
-    # [n_elastic, n_inelastic, requested_slice_type, duration, bw, price, network_occupation]
-    # reward: price * duration when slice is accepted,
-
-    # self.state[0][1][0] = 20
-    # self.state[0][1][1] = 15
-    # self.state[0][1][2] = 10
-    # self.state[0][1][3] = 20
-    # self.state[0][2][0] = 30
-    # self.state[0][2][1] = 5
-    # self.state[0][2][2] = 15
-    # self.state[0][2][3] = 25
-    # reward: quanto maior a LB livre após alocação, maior a reward (network_occupation)
