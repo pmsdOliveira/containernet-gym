@@ -7,23 +7,17 @@ from matplotlib import pylab as plt
 from collections import deque
 import copy
 
-l1 = 6
-l2 = 100
-l3 = 500
-l4 = 200
-l5 = 50
-l6 = 2
+l1 = 86
+l2 = 150
+l3 = 200
+l4 = 2
 
 q_net = torch.nn.Sequential(
     torch.nn.Linear(l1, l2),
     torch.nn.ReLU(),
     torch.nn.Linear(l2, l3),
     torch.nn.ReLU(),
-    torch.nn.Linear(l3, l4),
-    torch.nn.ReLU(),
-    torch.nn.Linear(l4, l5),
-    torch.nn.ReLU(),
-    torch.nn.Linear(l5, l6),
+    torch.nn.Linear(l3, l4)
 )
 
 target_net = copy.deepcopy(q_net)
@@ -50,7 +44,7 @@ for i in range(1, epochs + 1):
     print(f"Epoch {i}:")
     step = 1
     total_reward = 0
-    state = torch.flatten(torch.from_numpy(env.reset().astype(np.float32))).reshape(1, 6)
+    state = torch.flatten(torch.from_numpy(env.reset().astype(np.float32))).reshape(1, 86)
     done = False
 
     while not done:
@@ -60,7 +54,7 @@ for i in range(1, epochs + 1):
         action = np.random.randint(0, 1) if random.random() < epsilon else np.argmax(qval)
 
         next_state, reward, done, _ = env.step(action)
-        next_state = torch.flatten(torch.from_numpy(next_state.astype(np.float32))).reshape(1, 6)
+        next_state = torch.flatten(torch.from_numpy(next_state.astype(np.float32))).reshape(1, 86)
 
         replay.append((state, action, reward, next_state, done))
         state = next_state

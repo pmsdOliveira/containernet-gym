@@ -29,7 +29,8 @@ MacPair = Tuple[str, str]  # ("00:00:00:00:00:01", "00:00:00:00:00:02")
 Path = List[Tuple[int, int, int]]  # [(1, 1, 4), (6, 1, 2), (2, 4, 1)]
 
 
-def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float], nx.Graph):
+def load_topology(file: str
+                  ) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float], nx.Graph):
     mac_name: Dict[str, str] = {}
     ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
@@ -70,7 +71,7 @@ def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, Switc
                     link_bw[s2_idx, s1_idx] = float(cols[2])
                     if s2_idx not in graph:
                         graph.add_node(s2_idx)
-                    graph.add_edge(s1_idx, s2_idx, weight=cols[2])
+                    graph.add_edge(s1_idx, s2_idx, weight=float(cols[2]) * 1000)
                 else:  # a host
                     hexadecimal: str = f'{len(host_switch_port) + 1:012X}'
                     host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
@@ -80,7 +81,7 @@ def load_topology(file: str) -> (Dict[str, str], Dict[str, str], Dict[str, Switc
                     ip_mac[f'10.0.0.{len(host_switch_port) + 1}'] = host_mac
                     switch_ports[s1_idx] = switch_ports[s1_idx] + 1 if switch_ports.get(s1_idx) else 1
                     host_switch_port[host_mac] = (s1_idx, switch_ports[s1_idx])
-                    graph.add_edge(host_mac, s1_idx, weight=cols[2])
+                    graph.add_edge(host_mac, s1_idx, weight=float(cols[2]) * 1000)
     return mac_name, ip_mac, host_switch_port, adjacency, link_bw, graph
 
 
@@ -124,19 +125,25 @@ def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> 
         for path_idx, path in enumerate(path_list):
             switches = [switch for (switch, in_port, out_port) in path]
             pairs = [(switches[i], switches[i + 1]) for i in range(len(switches) - 1)]
-            bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair).get('weight', 0.0) for pair in pairs)
+            bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair)['weight'] for pair in pairs)
     return bottlenecks
 
 
-def select_best_paths(paths: Dict[MacPair, List[Path]], bottlenecks: Dict[MacPair, List[float]]) -> Dict[MacPair, Path]:
-    best_bottleneck: float = float("Inf")
+def select_best_paths(paths: Dict[MacPair, List[Path]], bottlenecks: Dict[MacPair, List[float]], active_paths: Dict[MacPair, int]
+                      ) -> (Dict[MacPair, Path], Dict[MacPair, int]):
     best_paths: Dict[MacPair, Path] = {}
+    paths_in_use: Dict[MacPair, int] = active_paths.copy()
     for (src, dst), path_list in paths.items():
-        for path_idx, path in enumerate(path_list):
-            if bottlenecks[src, dst][path_idx] < best_bottleneck:
-                best_bottleneck = bottlenecks[src, dst][path_idx]
-                best_paths[src, dst] = path
-    return best_paths
+        if paths_in_use[src, dst] != -1:  # if a path is in use, don't change it
+            best_paths[src, dst] = paths[src, dst][paths_in_use[src, dst]]
+        else:
+            best_bottleneck: float = float("Inf")
+            for path_idx, path in enumerate(path_list):
+                if bottlenecks[src, dst][path_idx] < best_bottleneck:
+                    best_bottleneck = bottlenecks[src, dst][path_idx]
+                    best_paths[src, dst] = path
+                    paths_in_use[src, dst] = path_idx
+    return best_paths, paths_in_use
 
 
 def request_stats(datapath: Datapath) -> None:
@@ -189,33 +196,34 @@ class Controller(app_manager.RyuApp):
 
         self.paths: Dict[MacPair, List[Path]] = create_paths(self.graph, self.mac_name, self.host_switch_port, self.adjacency)
         self.bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+        self.active_paths: DefaultDict[MacPair, int] = defaultdict(lambda: -1)
+        _, self.active_paths = select_best_paths(self.paths, self.bottlenecks, self.active_paths)
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
-        self.prev_available_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
         self.available_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
         self.used_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
         self.tx_bytes: Dict[EndpointPair, int] = defaultdict(lambda: 0)
         self.clock: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
 
         self.done_switches: List[int] = []
-        self.bw_connection: socket = None
+        self.bottlenecks_socket: socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         self.topology_api_app = self
         self.monitor_bw_thread = hub.spawn(self.monitor_bw)
+        #self.monitor_paths_thread = hub.spawn(self.monitor_paths)
 
     def monitor_bw(self) -> None:
-        bw_server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        bw_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        bw_server_socket.bind(('127.0.0.1', 6654))
-        bw_server_socket.listen()
-        self.bw_connection, _ = bw_server_socket.accept()
+        self.bottlenecks_socket.connect(('127.0.0.1', 6654))
 
         while True:
             print(datetime.now().strftime("\n\n%H:%M:%S\n"))
             for switch, datapath in self.switch_datapath.items():
                 request_stats(datapath)
             hub.sleep(UPDATE_PERIOD)
+
+    def monitor_paths(self) -> None:
+        pass
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
@@ -234,12 +242,10 @@ class Controller(app_manager.RyuApp):
         datapath = ev.datapath
         self.switch_datapath[datapath.id] = datapath
         if len(self.switch_datapath) == len(set(s1 for (s1, s2) in self.adjacency.keys())):  # after all switches register
-            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
-            paths: Dict[MacPair, Path] = select_best_paths(self.paths, bottlenecks)
-            for src in self.host_switch_port.keys():
-                for dst in self.host_switch_port.keys():
-                    if src != dst:
-                        install_path(src, dst, paths[src, dst], self.switch_datapath)
+            self.bottlenecks = get_paths_bottlenecks(self.graph, self.paths)
+            best_paths, self.active_paths = select_best_paths(self.paths, self.bottlenecks, self.active_paths)
+            for (src, dst), path in best_paths.items():
+                install_path(src, dst, best_paths[src, dst], self.switch_datapath)
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev) -> None:
@@ -256,22 +262,24 @@ class Controller(app_manager.RyuApp):
                     self.clock[dpid, switch] = time.time()
 
         self.done_switches += [dpid]
-        if len(set(self.done_switches)) == len([sw for sw in self.switch_datapath.keys()]):  # all switches recalculated links' bw
-            for (src, dst), bw in self.available_bw.items():
-                self.graph[src][dst]['weight'] = bw
+        if len(set(self.done_switches)) == len(self.switch_datapath.keys()):  # all switches recalculated links' bw
+            for (src, dst), bw in sorted(self.available_bw.items()):
+                self.graph[src][dst]['weight'] = min(self.available_bw[src, dst], self.available_bw[dst, src])
 
-            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+            self.bottlenecks = get_paths_bottlenecks(self.graph, self.paths)
 
             data: str = ''
-            for (src, dst), bottleneck_list in bottlenecks.items():
-                data += f'{self.mac_name[src]}_{self.mac_name[dst]}=' \
-                        f'{",".join(str(bottleneck) for bottleneck in bottleneck_list)}\n'
-            self.bw_connection.sendall(len(data).to_bytes(16, byteorder))
-            self.bw_connection.sendall(data.encode('utf-8'))
+            for (src, dst), bottleneck_list in self.bottlenecks.items():
+                if self.mac_name[src][0] == 'B':
+                    data += f'{",".join(str(bottleneck) for bottleneck in bottleneck_list)}\n'
+            self.bottlenecks_socket.sendall(len(data).to_bytes(16, byteorder))
+            self.bottlenecks_socket.sendall(data.encode('utf-8'))
 
-            # TODO: Update best path for each (src, dst) pair
-            bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
-            paths: Dict[MacPair, Path] = select_best_paths(self.paths, bottlenecks)
+            new_paths, self.active_paths = select_best_paths(self.paths, self.bottlenecks, self.active_paths)
+            for (src, dst) in self.paths.keys():
+                if new_paths[src, dst] != self.paths[src, dst][self.active_paths[src, dst]]:
+                    uninstall_path(src, dst, self.paths[src, dst][self.active_paths[src, dst]], self.switch_datapath)
+                    install_path(src, dst, new_paths[src, dst], self.switch_datapath)
 
             self.done_switches = []
 
@@ -293,8 +301,9 @@ class Controller(app_manager.RyuApp):
         dpid = datapath.id
 
         out_port = None
-        path = self.paths.get((src, dst), None)
-        if path:
+        paths = self.paths.get((src, dst))
+        if paths:
+            path = paths[self.active_paths[src, dst]]
             for sw, p1, p2 in path:
                 if sw == dpid:
                     out_port = p2

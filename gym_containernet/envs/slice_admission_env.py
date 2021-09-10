@@ -5,9 +5,12 @@ from bisect import bisect_left
 from gym import Env
 from gym.spaces import Box, Discrete
 import json
+from math import ceil
 import numpy as np
 from queue import Queue
 import random
+import socket
+from sys import byteorder
 from threading import Thread
 from time import sleep
 from typing import Dict, List
@@ -16,10 +19,11 @@ from typing import Dict, List
 ELASTIC_ARRIVAL_AVERAGE = 5
 INELASTIC_ARRIVAL_AVERAGE = 10
 DURATION_AVERAGE = 15
-CLIENT_SERVER_PAIRS = [('BS1', 'CU1'), ('BS1', 'CU2'), ('BS1', 'CU3'), ('BS1', 'CU4'),
-                       ('BS2', 'CU1'), ('BS2', 'CU2'), ('BS2', 'CU3'), ('BS2', 'CU4'),
-                       ('BS3', 'CU1'), ('BS3', 'CU2'), ('BS3', 'CU3'), ('BS3', 'CU4'),
-                       ('BS4', 'CU1'), ('BS4', 'CU2'), ('BS4', 'CU3'), ('BS4', 'CU4')]
+
+NUMBER_OF_BASE_STATIONS = 4
+NUMBER_OF_COMPUTING_STATIONS = 4
+NUMBER_OF_PATHS = 4
+STATE_DIM = 6 + NUMBER_OF_BASE_STATIONS * NUMBER_OF_COMPUTING_STATIONS * (1 + NUMBER_OF_PATHS)
 
 
 def closest(values: List, number: float) -> int:
@@ -52,7 +56,7 @@ def evaluate_elastic_slice(bw: float, price: float, data: Dict) -> float:
         print(f"Finished elastic slice {average_bitrate} >= {bw}")
         return 0.0
     print(f"Failed elastic slice {average_bitrate} < {bw}")
-    return -price / 2
+    return - price / 2
 
 
 def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
@@ -61,16 +65,19 @@ def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
         print(f"Finished inelastic slice {worst_bitrate} >= {bw}")
         return 0.0
     print(f"Finished inelastic slice {worst_bitrate} < {bw}")
-    return -price
+    return - price
 
 
 class SliceAdmissionEnv(Env):
     def __init__(self):
         self.backend: TopologyManager = TopologyManager()
 
-        self.observation_space: Box = Box(low=np.zeros(6, dtype=np.float32), high=np.full(6, 100.0, dtype=np.float32), dtype=np.float32)
+        self.observation_space: Box = Box(low=np.zeros(STATE_DIM, dtype=np.float32), high=np.full(STATE_DIM, 1000.0, dtype=np.float32),
+                                          dtype=np.float32)
         self.action_space: Discrete = Discrete(2)
-        self.state: np.ndarray = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.state: np.ndarray = np.zeros(STATE_DIM, dtype=np.float32)
+
+        self.bottlenecks: List[float] = []
 
         self.requests: int = 0
         self.max_requests: int = 12
@@ -88,11 +95,19 @@ class SliceAdmissionEnv(Env):
                     self.inelastic_request_templates += [(int(duration), float(bw), float(price))]
 
         self.active_ports: List[int] = []
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as bottlenecks_socket:
+            bottlenecks_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            bottlenecks_socket.bind(('127.0.0.1', 6654))
+            bottlenecks_socket.listen()
+            self.bottlenecks_connection, _ = bottlenecks_socket.accept()
+            Thread(target=self.receive_bottlenecks).start()
+
         sleep(5)  # give the controller time to build starting paths
 
     def reset(self) -> object:
         self.backend.clear_logs()
-        self.state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.state = np.zeros(70, dtype=np.float32)
 
         self.requests = 0
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
@@ -104,25 +119,26 @@ class SliceAdmissionEnv(Env):
         Thread(target=self.request_generator, args=(2,)).start()
 
         request = self.requests_queue.get(block=True)
-        self.state[2] = request["type"]
-        self.state[3] = request["duration"]
-        self.state[4] = request["bw"]
-        self.state[5] = request["price"]
+        self.state[0] = request["type"]
+        self.state[1] = request["duration"]
+        self.state[2] = request["bw"]
+        self.state[3] = request["price"]
+        self.state[4:4 + NUMBER_OF_BASE_STATIONS * NUMBER_OF_COMPUTING_STATIONS] = request["connections"]
+        #self.state[4 + NUMBER_OF_BASE_STATIONS * NUMBER_OF_COMPUTING_STATIONS + 3:] = self.bottlenecks
 
         print(self.state)
         return self.state
 
     def step(self, action) -> (object, float, bool, dict):
-        self.state = list(self.state)  # convert numpy array to list
-
         reward: float = 0.0
         done: bool = False
 
         if self.state[2] != 0:  # slice arrival
             self.requests += 1
             if action == 1:
-                client, server = random.choice(CLIENT_SERVER_PAIRS)
                 print(f"Accepted request")
+                client = random.choice(['BS1', 'BS2', 'BS3', 'BS4'])
+                server = random.choice(['CS1', 'CS2', 'CS3', 'CS4'])
                 reward: float = self.state[3] * self.state[5]
                 self.create_slice(client, server, reward)
 
@@ -145,19 +161,28 @@ class SliceAdmissionEnv(Env):
 
         if self.requests < self.max_requests:
             request = self.requests_queue.get(block=True)
-            self.state[2] = request["type"]
-            self.state[3] = request["duration"]
-            self.state[4] = request["bw"]
-            self.state[5] = request["price"]
+            self.state[0] = request["type"]
+            self.state[1] = request["duration"]
+            self.state[2] = request["bw"]
+            self.state[3] = request["price"]
+            self.state[4:4 + NUMBER_OF_BASE_STATIONS * NUMBER_OF_COMPUTING_STATIONS] = request["connections"]
         else:
             done = True
 
-        self.state = np.array(self.state, dtype=np.float32)
         print(self.state)
-        return np.array(self.state, dtype=np.float32), reward, done, {}
+        return self.state, reward, done, {}
 
     def render(self, mode='human') -> None:
         pass
+
+    def receive_bottlenecks(self) -> None:
+        while True:
+            bottlenecks = []
+            size = int.from_bytes(self.bottlenecks_connection.recv(16), byteorder=byteorder)
+            data = self.bottlenecks_connection.recv(size).decode('utf-8')
+            for line in data.split('\n')[:-1]:
+                bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
+            self.bottlenecks = bottlenecks
 
     def create_slice(self, client: str, server: str, price: float) -> None:
         port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
@@ -168,16 +193,29 @@ class SliceAdmissionEnv(Env):
     def request_generator(self, slice_type: int) -> None:
         if slice_type not in [1, 2]:
             return
+
         while self.requests < self.max_requests:
             arrival: float = np.random.poisson(ELASTIC_ARRIVAL_AVERAGE if slice_type == 1 else INELASTIC_ARRIVAL_AVERAGE)
             sleep(arrival)
+
             if self.requests < self.max_requests:  # ensures req isn't created if new req is created while inside loop
                 duration: int = closest(DURATION_TEMPLATES, np.random.exponential(DURATION_AVERAGE))
+
                 if slice_type == 1:
                     _, bw, price = random.choice([template for template in self.elastic_request_templates if template[0] == duration])
                 else:
                     _, bw, price = random.choice([template for template in self.inelastic_request_templates if template[0] == duration])
-                self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw), price=float(price)))
+
+                number_connections = min(ceil(np.random.exponential(NUMBER_OF_BASE_STATIONS / 2)), NUMBER_OF_BASE_STATIONS)
+                base_stations = random.sample(range(NUMBER_OF_BASE_STATIONS), number_connections)
+                computing_stations = random.sample(range(NUMBER_OF_COMPUTING_STATIONS), number_connections)
+
+                connections = np.zeros((NUMBER_OF_BASE_STATIONS, NUMBER_OF_COMPUTING_STATIONS))
+                for (bs, cs) in zip(base_stations, computing_stations):
+                    connections[bs][cs] = 1
+
+                self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw),
+                                             price=float(price), connections=connections.flatten()))
 
     def slice_evaluator(self, client: str, server: str, slice_type: int, duration: int, bw: float, price: float) -> None:
         if slice_type not in [1, 2]:
@@ -189,7 +227,6 @@ class SliceAdmissionEnv(Env):
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0))
 
     # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
-    # TODO: trocar a ordem de como sao criados os estados
     # TODO: pré-computar 4 caminhos mais curtos entre cada par
     # TODO: um slice pode utilizar múltiplas BSs e MECSs/CSs
     # TODO: um iperf ter uma LB flutuante
