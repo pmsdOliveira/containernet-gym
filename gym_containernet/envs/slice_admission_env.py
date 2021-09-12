@@ -52,17 +52,19 @@ def json_from_log(client: str, server: str) -> Dict:
     return data
 
 
-def evaluate_elastic_slice(bw: float, price: float, data: Dict) -> float:
-    average_bitrate: float = data["end"]["streams"][0]["sender"]["bits_per_second"] / 1000000.0
-    if average_bitrate >= bw - bw * 0.05:
-        print(f"Finished elastic slice {average_bitrate} >= {bw}")
+def evaluate_elastic_slice(bw: float, price: float, data: List[Dict]) -> float:
+    average_bitrates: List[float] = [connection["end"]["streams"][0]["receiver"]["bits_per_second"] / 1000000.0 for connection in data]
+    total_average: float = sum(average_bitrates) / len(average_bitrates)
+    if total_average >= bw - bw * 0.05:
+        print(f"Finished elastic slice {total_average} >= {bw}")
         return 0.0
-    print(f"Failed elastic slice {average_bitrate} < {bw}")
+    print(f"Failed elastic slice {total_average} < {bw}")
     return - price / 2
 
 
-def evaluate_inelastic_slice(bw: float, price: float, data: Dict) -> float:
-    worst_bitrate = min(interval["streams"][0]["bits_per_second"] for interval in data["intervals"]) / 1000000.0
+def evaluate_inelastic_slice(bw: float, price: float, data: List[Dict]) -> float:
+    worst_bitrate: float = min(interval["streams"][0]["bits_per_second"] / 1000000.0
+                               for connection in data for interval in connection["intervals"])
     if worst_bitrate >= bw - bw * 0.05:
         print(f"Finished inelastic slice {worst_bitrate} >= {bw}")
         return 0.0
@@ -145,10 +147,14 @@ class SliceAdmissionEnv(Env):
 
                 connections = self.state[4:CONNECTIONS_OFFSET]
                 parsed_connections = [connections[i:i + BASE_STATIONS] for i in range(0, len(connections), BASE_STATIONS)]
+
+                clients, servers = [], []
                 for bs_idx, base_station in enumerate(parsed_connections):
                     for cs_idx, connected in enumerate(base_station):
                         if connected:
-                            self.create_slice(f'BS{bs_idx + 1}', f'CS{cs_idx + 1}')
+                            clients += [f'BS{bs_idx + 1}']
+                            servers += [f'CS{cs_idx + 1}']
+                self.create_slice(clients, servers)
 
                 if self.state[0] == 1:  # elastic slice
                     self.state[CONNECTIONS_OFFSET] += 1
@@ -197,12 +203,13 @@ class SliceAdmissionEnv(Env):
                 bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
             self.bottlenecks = bottlenecks
 
-    def create_slice(self, client: str, server: str) -> None:
-        port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
-        self.active_ports += [port]
-        self.backend.slice(client, server, port, self.state[1], self.state[2])
+    def create_slice(self, clients: List[str], servers: List[str]) -> None:
+        for (client, server) in zip(clients, servers):
+            port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
+            self.active_ports += [port]
+            self.backend.slice(client, server, port, self.state[1], self.state[2])
         Thread(target=self.slice_evaluator,
-               args=(client, server, self.state[0], self.state[1], self.state[2], self.state[1] * self.state[3])).start()
+               args=(clients, servers, self.state[0], self.state[1], self.state[2], self.state[1] * self.state[3])).start()
 
     def request_generator(self, slice_type: int) -> None:
         if slice_type not in [1, 2]:
@@ -231,13 +238,18 @@ class SliceAdmissionEnv(Env):
                 self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw),
                                              price=float(price), connections=connections.flatten()))
 
-    def slice_evaluator(self, client: str, server: str, slice_type: int, duration: int, bw: float, price: float) -> None:
+    def slice_evaluator(self, clients: List[str], servers: List[str], slice_type: int, duration: int, bw: float, price: float) -> None:
         if slice_type not in [1, 2]:
             return
+
         sleep(duration)
-        data: Dict = json_from_log(client, server)
+
+        data: List[Dict] = []
+        for (client, server) in zip(clients, servers):
+            data += [json_from_log(client, server)]
+
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
-        self.departed_info_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward, client=client, server=server))
+        self.departed_info_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward))
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0))
 
     # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
