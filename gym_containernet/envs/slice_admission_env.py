@@ -67,26 +67,26 @@ def closest(values: List, number: float) -> int:
     return before
 
 
-def json_from_log(client: str, server: str) -> Dict:
+def json_from_log(client: str, server: str, port: int) -> Dict:
     data: Dict = {}
     while not data:
         try:
-            with open(f"{DOCKER_VOLUME}/{client}_{server}.log", 'r') as f:
+            with open(f"{DOCKER_VOLUME}/{client}_{server}_{port}.log", 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
-            print("JSON ERROR")
+            print(f"Error in {client}_{server}.log")
             sleep(0.1)
     return data
 
 
-def evaluate_elastic_slice(bw: float, price: float, data: List[Dict]) -> float:
+def evaluate_elastic_slice(bw: float, full_price: float, data: List[Dict]) -> float:
     averages: List[float] = [connection["end"]["streams"][0]["receiver"]["bits_per_second"] / 1000000.0 for connection in data]
     total_average: float = sum(averages) / len(averages)
     if total_average >= bw - bw * 0.05:
         print(f"Finished elastic slice {total_average} >= {bw}")
         return 0.0
     print(f"Failed elastic slice {total_average} < {bw}")
-    return - price / 2
+    return - full_price / 2
 
 
 def evaluate_inelastic_slice(bw: float, price: float, data: List[Dict]) -> float:
@@ -112,7 +112,7 @@ class SliceAdmissionEnv(Env):
         self.requests: int = 0
         self.max_requests: int = 12
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
-        self.departed_info_queue: Queue = Queue(maxsize=self.max_requests)
+        self.departed_queue: Queue = Queue(maxsize=self.max_requests)
 
         self.generator_semaphore: bool = False
         self.elastic_generator = None
@@ -140,7 +140,7 @@ class SliceAdmissionEnv(Env):
 
         self.requests = 0
         self.requests_queue = Queue(maxsize=self.max_requests)
-        self.departed_info_queue = Queue(maxsize=self.max_requests)
+        self.departed_queue = Queue(maxsize=self.max_requests)
 
         self.active_ports = []
 
@@ -160,7 +160,7 @@ class SliceAdmissionEnv(Env):
         reward: float = 0.0
         done: bool = False
 
-        if self.state[0]:  # slice arrival
+        if self.state[0]:
             self.requests += 1
             if action == 1:
                 print(f"Accepted request")
@@ -172,18 +172,25 @@ class SliceAdmissionEnv(Env):
                 reward = self.state[1] * self.state[3]
             else:
                 print("Rejected request")
-        else:  # slice departure
-            reward += self.state_from_departure(self.departed_info_queue.get())
-            return self.state, reward, done, {}
 
         if self.requests < self.max_requests:
             self.state_from_request(self.requests_queue.get(block=True))
+            if self.state[0] == 0:  # slice departure
+                departure = self.departed_queue.get()
+                self.state[CONNECTIONS_OFFSET + departure["type"] - 1] -= 1
+                reward += departure["reward"]
         else:
-            self.stop_generators()
+            if self.generator_semaphore:
+                self.stop_generators()
             for evaluator in self.evaluators:
-                if evaluator.is_alive():
+                if evaluator.is_alive():  # might create errors if a second evaluator finishes before this one
                     evaluator.join()
-                    reward += self.state_from_departure(self.departed_info_queue.get())
+
+                    departure = self.departed_queue.get()
+                    self.state[:CONNECTIONS_OFFSET] = np.zeros(4 + BASE_STATIONS * COMPUTING_STATIONS)
+                    self.state[CONNECTIONS_OFFSET + departure["type"] - 1] -= 1
+                    self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
+                    reward += departure["reward"]
 
                     print(self.state)
                     return self.state, reward, done, {}
@@ -212,24 +219,16 @@ class SliceAdmissionEnv(Env):
         self.state[4:CONNECTIONS_OFFSET] = request["connections"]
         self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
 
-    def state_from_departure(self, departure: Dict) -> float:
-        self.state[0] = 0
-        self.state[1] = 0
-        self.state[2] = 0
-        self.state[3] = 0
-        self.state[4:CONNECTIONS_OFFSET] = np.zeros(BASE_STATIONS * COMPUTING_STATIONS)
-        self.state[CONNECTIONS_OFFSET + departure["type"] - 1] -= 1
-        self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
-        return departure["reward"]
-
     def create_slice(self, clients: List[str], servers: List[str]) -> None:
+        ports: List[int] = []
         for (client, server) in zip(clients, servers):
             port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
+            ports += [port]
             self.active_ports += [port]
             self.backend.slice(client, server, port, self.state[1], self.state[2])
 
         evaluator = Thread(target=self.slice_evaluator,
-                           args=(clients, servers, self.state[0], self.state[1], self.state[2], self.state[1] * self.state[3]))
+                           args=(clients, servers, ports, self.state[0], self.state[1], self.state[2], self.state[1] * self.state[3]))
         self.evaluators += [evaluator]
         evaluator.start()
 
@@ -267,18 +266,19 @@ class SliceAdmissionEnv(Env):
                 self.requests_queue.put(dict(type=slice_type, duration=int(duration), bw=float(bw),
                                              price=float(price), connections=connections.flatten()))
 
-    def slice_evaluator(self, clients: List[str], servers: List[str], slice_type: int, duration: int, bw: float, price: float) -> None:
+    def slice_evaluator(self, clients: List[str], servers: List[str], ports: List[int], slice_type: int, duration: int, bw: float, price: float
+                        ) -> None:
         if slice_type not in [1, 2]:
             return
 
         sleep(duration)
 
         data: List[Dict] = []
-        for (client, server) in zip(clients, servers):
-            data += [json_from_log(client, server)]
+        for (client, server, port) in zip(clients, servers, ports):
+            data += [json_from_log(client, server, port)]
 
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
-        self.departed_info_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward))
+        self.departed_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward))
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0,
                                      connections=np.zeros(BASE_STATIONS * COMPUTING_STATIONS, dtype=np.float32)))
 

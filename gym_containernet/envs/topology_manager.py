@@ -54,5 +54,5 @@ class TopologyManager:
         dst: Host = self.network.get(destination)
         if src and dst:
             dst.cmd(f"iperf3 -s -p {port} -i 1 &")
-            src.cmd(f"iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M -J >& /home/volume/{source}_{destination}.log &")
+            src.cmd(f"iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M -J >& /home/volume/{source}_{destination}_{port}.log &")
             sleep(1)

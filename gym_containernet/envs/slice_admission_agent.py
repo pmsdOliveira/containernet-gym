@@ -51,7 +51,7 @@ for i in range(1, epochs + 1):
         print(f"Step {step}")
         step += 1
         qval = q_net(state).data.numpy()
-        action = np.random.randint(0, 1) if random.random() < epsilon else np.argmax(qval)
+        action = np.random.randint(0, 2) if random.random() < epsilon else np.argmax(qval)
 
         next_state, reward, done, _ = env.step(action)
         next_state = torch.flatten(torch.from_numpy(next_state.astype(np.float32))).reshape(1, 86)
