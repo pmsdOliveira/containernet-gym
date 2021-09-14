@@ -74,7 +74,7 @@ def json_from_log(client: str, server: str, port: int) -> Dict:
             with open(f"{DOCKER_VOLUME}/{client}_{server}_{port}.log", 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
-            print(f"Error in {client}_{server}.log")
+            print(f"Error in {client}_{server}_{port}.log")
             sleep(0.1)
     return data
 
@@ -185,18 +185,16 @@ class SliceAdmissionEnv(Env):
             for evaluator in self.evaluators:
                 if evaluator.is_alive():  # might create errors if a second evaluator finishes before this one
                     evaluator.join()
-
-                    departure = self.departed_queue.get()
-                    self.state[:CONNECTIONS_OFFSET] = np.zeros(4 + BASE_STATIONS * COMPUTING_STATIONS)
-                    self.state[CONNECTIONS_OFFSET + departure["type"] - 1] -= 1
-                    self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
-                    reward += departure["reward"]
-
+                    reward += self.state_from_departure(self.departed_queue.get())
                     print(self.state)
                     return self.state, reward, done, {}
+            while not self.departed_queue.empty():  # prevent the previous error
+                reward += self.state_from_departure(self.departed_queue.get())
+                print(self.state)
+                return self.state, reward, done, {}
             done = True
 
-        print(self.state)
+        print(self.state, self.departed_queue.qsize())
         return self.state, reward, done, {}
 
     def render(self, mode='human') -> None:
@@ -218,6 +216,12 @@ class SliceAdmissionEnv(Env):
         self.state[3] = request["price"]
         self.state[4:CONNECTIONS_OFFSET] = request["connections"]
         self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
+
+    def state_from_departure(self, departure: Dict) -> float:
+        self.state[:CONNECTIONS_OFFSET] = np.zeros(4 + BASE_STATIONS * COMPUTING_STATIONS, dtype=np.float32)
+        self.state[CONNECTIONS_OFFSET + departure["type"] - 1] -= 1
+        self.state[CONNECTIONS_OFFSET + 2:] = self.bottlenecks
+        return departure["reward"]
 
     def create_slice(self, clients: List[str], servers: List[str]) -> None:
         ports: List[int] = []
@@ -259,7 +263,7 @@ class SliceAdmissionEnv(Env):
                 base_stations = random.sample(range(BASE_STATIONS), number_connections)
                 computing_stations = random.sample(range(COMPUTING_STATIONS), number_connections)
 
-                connections = np.zeros((BASE_STATIONS, COMPUTING_STATIONS))
+                connections = np.zeros((BASE_STATIONS, COMPUTING_STATIONS), dtype=np.float32)
                 for (bs, cs) in zip(base_stations, computing_stations):
                     connections[bs][cs] = 1
 
