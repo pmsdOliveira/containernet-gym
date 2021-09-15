@@ -19,7 +19,9 @@ from typing import Any, DefaultDict, Dict, List, Tuple, Union
 
 
 TOPOLOGY_FILE = "topology.txt"
-NUMBER_OF_PATHS = 4
+BASE_STATIONS = 4
+COMPUTING_STATIONS = 4
+PATHS = 4
 UPDATE_PERIOD = 5   # seconds
 
 # Custom types
@@ -27,6 +29,11 @@ EndpointPair = Tuple[int, int]  # (1, 2)
 SwitchPort = Tuple[int, int]  # (1, 2)
 MacPair = Tuple[str, str]  # ("00:00:00:00:00:01", "00:00:00:00:00:02")
 Path = List[Tuple[int, int, int]]  # [(1, 1, 4), (6, 1, 2), (2, 4, 1)]
+
+
+def int_to_mac(n: int) -> str:
+    hexadecimal: str = f'{n:012X}'
+    return ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
 
 
 def load_topology(file: str
@@ -43,8 +50,7 @@ def load_topology(file: str
         for line in topology.readlines()[2:]:
             cols: List[str] = line.split()
             if cols[0][0] != 'S':  # host connects to
-                hexadecimal: str = f'{len(host_switch_port) + 1:012X}'
-                host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
+                host_mac: str = int_to_mac(len(host_switch_port) + 1)
                 mac_name[host_mac] = cols[0]
                 if host_mac not in graph:
                     graph.add_node(host_mac)
@@ -73,8 +79,7 @@ def load_topology(file: str
                         graph.add_node(s2_idx)
                     graph.add_edge(s1_idx, s2_idx, weight=float(cols[2]) * 1000)
                 else:  # a host
-                    hexadecimal: str = f'{len(host_switch_port) + 1:012X}'
-                    host_mac: str = ':'.join(hexadecimal[i:i + 2] for i in range(0, 12, 2))
+                    host_mac: str = int_to_mac(len(host_switch_port) + 1)
                     mac_name[host_mac] = cols[1]
                     if host_mac not in graph:
                         graph.add_node(host_mac)
@@ -93,8 +98,8 @@ def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Di
     all_paths = {}
     for bs in base_stations:
         for cs in computing_stations:
-            all_paths[bs, cs] = sorted(list(nx.all_simple_paths(graph, bs, cs)), key=lambda x: len(x))[:NUMBER_OF_PATHS]
-            all_paths[cs, bs] = sorted(list(nx.all_simple_paths(graph, cs, bs)), key=lambda x: len(x))[:NUMBER_OF_PATHS]
+            all_paths[bs, cs] = sorted(list(nx.all_simple_paths(graph, bs, cs)), key=lambda x: len(x))[:PATHS]
+            all_paths[cs, bs] = sorted(list(nx.all_simple_paths(graph, cs, bs)), key=lambda x: len(x))[:PATHS]
 
     for paths in all_paths.values():
         for path_idx, path in enumerate(paths):
@@ -120,7 +125,7 @@ def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Di
 
 
 def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> Dict[MacPair, List[float]]:
-    bottlenecks: Dict[MacPair, Union[List[None], List[float]]] = defaultdict(lambda: NUMBER_OF_PATHS * [None])
+    bottlenecks: Dict[MacPair, Union[List[None], List[float]]] = defaultdict(lambda: PATHS * [None])
     for (src, dst), path_list in paths.items():
         for path_idx, path in enumerate(path_list):
             switches = [switch for (switch, in_port, out_port) in path]
@@ -208,10 +213,11 @@ class Controller(app_manager.RyuApp):
 
         self.done_switches: List[int] = []
         self.bottlenecks_socket: socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.paths_connection: socket = None
 
         self.topology_api_app = self
         self.monitor_bw_thread = hub.spawn(self.monitor_bw)
-        #self.monitor_paths_thread = hub.spawn(self.monitor_paths)
+        self.monitor_paths_thread = hub.spawn(self.monitor_paths)
 
     def monitor_bw(self) -> None:
         self.bottlenecks_socket.connect(('127.0.0.1', 6654))
@@ -223,7 +229,25 @@ class Controller(app_manager.RyuApp):
             hub.sleep(UPDATE_PERIOD)
 
     def monitor_paths(self) -> None:
-        pass
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as paths_socket:
+            paths_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            paths_socket.bind(('127.0.0.1', 6655))
+            paths_socket.listen()
+            self.paths_connection, _ = paths_socket.accept()
+
+        while True:
+            new_paths = self.active_paths.copy()
+            size = int.from_bytes(self.paths_connection.recv(16), byteorder=byteorder)
+            data = self.paths_connection.recv(size).decode('utf-8')
+            for idx, path_idx in enumerate(data.split(',')):
+                client: str = int_to_mac(idx // BASE_STATIONS + 1)
+                server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
+                new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
+
+                if new_paths[client, server] != self.active_paths[client, server]:
+                    uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)
+                    install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
+                    self.active_paths[client, server] = new_paths[client, server]
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
@@ -274,12 +298,6 @@ class Controller(app_manager.RyuApp):
                     data += f'{",".join(str(bottleneck) for bottleneck in bottleneck_list)}\n'
             self.bottlenecks_socket.sendall(len(data).to_bytes(16, byteorder))
             self.bottlenecks_socket.sendall(data.encode('utf-8'))
-
-            new_paths, self.active_paths = select_best_paths(self.paths, self.bottlenecks, self.active_paths)
-            for (src, dst) in self.paths.keys():
-                if new_paths[src, dst] != self.paths[src, dst][self.active_paths[src, dst]]:
-                    uninstall_path(src, dst, self.paths[src, dst][self.active_paths[src, dst]], self.switch_datapath)
-                    install_path(src, dst, new_paths[src, dst], self.switch_datapath)
 
             self.done_switches = []
 

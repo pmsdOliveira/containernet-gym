@@ -74,8 +74,7 @@ def json_from_log(client: str, server: str, port: int) -> Dict:
             with open(f"{DOCKER_VOLUME}/{client}_{server}_{port}.log", 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
-            print(f"Error in {client}_{server}_{port}.log")
-            sleep(0.1)
+            sleep(0.2)
     return data
 
 
@@ -107,8 +106,6 @@ class SliceAdmissionEnv(Env):
         self.action_space: Discrete = Discrete(2)
         self.state: np.ndarray = np.zeros(STATE_DIM, dtype=np.float32)
 
-        self.bottlenecks: List[float] = []
-
         self.requests: int = 0
         self.max_requests: int = 12
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
@@ -124,6 +121,11 @@ class SliceAdmissionEnv(Env):
         self.elastic_request_templates, self.inelastic_request_templates = read_templates("request_templates.txt")
 
         self.active_ports: List[int] = []
+        self.active_connections: List[str] = []
+        self.active_paths: List[int] = BASE_STATIONS * COMPUTING_STATIONS * [-1]
+        self.bottlenecks: List[float] = []
+
+        self.paths_socket: socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as bottlenecks_socket:
             bottlenecks_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -133,6 +135,7 @@ class SliceAdmissionEnv(Env):
             Thread(target=self.receive_bottlenecks).start()
 
         sleep(10)  # give the controller time to build starting paths
+        self.paths_socket.connect(('127.0.0.1', 6655))
 
     def reset(self) -> object:
         self.backend.clear_logs()
@@ -143,6 +146,8 @@ class SliceAdmissionEnv(Env):
         self.departed_queue = Queue(maxsize=self.max_requests)
 
         self.active_ports = []
+        self.active_paths = BASE_STATIONS * COMPUTING_STATIONS * [-1]
+        self.active_connections = []
 
         self.generator_semaphore = True
         self.elastic_generator = Thread(target=self.request_generator, args=(1, ))
@@ -151,9 +156,10 @@ class SliceAdmissionEnv(Env):
         self.inelastic_generator.start()
         self.evaluators = []
 
+        self.send_paths()
         self.state_from_request(self.requests_queue.get(block=True))
 
-        print(self.state)
+        # print(self.state)
         return self.state
 
     def step(self, action) -> (object, float, bool, dict):
@@ -186,15 +192,15 @@ class SliceAdmissionEnv(Env):
                 if evaluator.is_alive():  # might create errors if a second evaluator finishes before this one
                     evaluator.join()
                     reward += self.state_from_departure(self.departed_queue.get())
-                    print(self.state)
+                    # print(self.state)
                     return self.state, reward, done, {}
             while not self.departed_queue.empty():  # prevent the previous error
                 reward += self.state_from_departure(self.departed_queue.get())
-                print(self.state)
+                # print(self.state)
                 return self.state, reward, done, {}
             done = True
 
-        print(self.state, self.departed_queue.qsize())
+        # print(self.state)
         return self.state, reward, done, {}
 
     def render(self, mode='human') -> None:
@@ -208,6 +214,11 @@ class SliceAdmissionEnv(Env):
             for line in data.split('\n')[:-1]:
                 bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
             self.bottlenecks = bottlenecks
+
+    def send_paths(self) -> None:
+        data: str = ','.join(str(path) for path in self.active_paths)
+        self.paths_socket.sendall(len(data).to_bytes(16, byteorder))
+        self.paths_socket.sendall(data.encode('utf-8'))
 
     def state_from_request(self, request: Dict) -> None:
         self.state[0] = request["type"]
@@ -229,6 +240,15 @@ class SliceAdmissionEnv(Env):
             port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
             ports += [port]
             self.active_ports += [port]
+
+            self.active_connections += [f'{client}_{server}_{port}']
+
+            connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
+            bottleneck_idx: int = connection_idx * COMPUTING_STATIONS
+            self.active_paths[connection_idx] = np.argmax(self.bottlenecks[bottleneck_idx:bottleneck_idx + PATHS]) \
+                if self.active_paths[connection_idx] == -1 else self.active_paths[connection_idx]
+
+            self.send_paths()
             self.backend.slice(client, server, port, self.state[1], self.state[2])
 
         evaluator = Thread(target=self.slice_evaluator,
@@ -281,10 +301,13 @@ class SliceAdmissionEnv(Env):
         for (client, server, port) in zip(clients, servers, ports):
             data += [json_from_log(client, server, port)]
 
+            self.active_connections.remove(f'{client}_{server}_{port}')
+            if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection):
+                connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
+                self.active_paths[connection_idx] = -1
+                self.send_paths()
+
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
         self.departed_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward))
         self.requests_queue.put(dict(type=0, duration=0, bw=0.0, price=0.0,
                                      connections=np.zeros(BASE_STATIONS * COMPUTING_STATIONS, dtype=np.float32)))
-
-    # NOTA: os container podem ser usados no futuro para client-server apps por exemplo
-    # TODO: pré-computar 4 caminhos mais curtos entre cada par
