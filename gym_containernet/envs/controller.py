@@ -5,7 +5,6 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.controller.controller import Datapath
 from ryu.lib import hub
-from ryu.lib.packet import packet, arp
 
 from collections import defaultdict
 from datetime import datetime
@@ -300,37 +299,3 @@ class Controller(app_manager.RyuApp):
             self.bottlenecks_socket.sendall(data.encode('utf-8'))
 
             self.done_switches = []
-
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def packet_in_handler(self, ev) -> None:
-        msg = ev.msg
-        datapath = msg.datapath
-        proto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        in_port = msg.match['in_port']
-
-        pkt = packet.Packet(msg.data)
-        pkt = pkt.get_protocol(arp.arp)
-        if not pkt:
-            return
-
-        src = pkt.src_mac
-        dst = self.ip_mac[pkt.dst_ip]
-        dpid = datapath.id
-
-        out_port = None
-        paths = self.paths.get((src, dst))
-        if paths:
-            path = paths[self.active_paths[src, dst]]
-            for sw, p1, p2 in path:
-                if sw == dpid:
-                    out_port = p2
-
-        data = None
-        if msg.buffer_id == proto.OFP_NO_BUFFER:
-            data = msg.data
-
-        if out_port:
-            actions = [parser.OFPActionOutput(out_port)]
-            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data)
-            datapath.send_msg(out)
