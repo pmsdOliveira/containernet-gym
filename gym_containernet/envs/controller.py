@@ -24,7 +24,7 @@ PATHS = 4
 UPDATE_PERIOD = 5   # seconds
 
 # Custom types
-EndpointPair = Tuple[int, int]  # (1, 2)
+SwitchPair = Tuple[int, int]  # (1, 2)
 SwitchPort = Tuple[int, int]  # (1, 2)
 MacPair = Tuple[str, str]  # ("00:00:00:00:00:01", "00:00:00:00:00:02")
 Path = List[Tuple[int, int, int]]  # [(1, 1, 4), (6, 1, 2), (2, 4, 1)]
@@ -36,13 +36,13 @@ def int_to_mac(n: int) -> str:
 
 
 def load_topology(file: str
-                  ) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[EndpointPair, int], Dict[EndpointPair, float], nx.Graph):
+                  ) -> (Dict[str, str], Dict[str, str], Dict[str, SwitchPort], Dict[SwitchPair, int], Dict[SwitchPair, float], nx.Graph):
     mac_name: Dict[str, str] = {}
     ip_mac: Dict[str, str] = {}
     switch_ports: Dict[int, int] = {}
     host_switch_port: Dict[str, SwitchPort] = {}
-    adjacency: DefaultDict[EndpointPair, int] = defaultdict(lambda: 0)
-    link_bw: Dict[EndpointPair, float] = {}
+    adjacency: DefaultDict[SwitchPair, int] = defaultdict(lambda: 0)
+    link_bw: Dict[SwitchPair, float] = {}
     graph: nx.Graph = nx.Graph()
 
     with open(file, 'r') as topology:
@@ -89,7 +89,7 @@ def load_topology(file: str
     return mac_name, ip_mac, host_switch_port, adjacency, link_bw, graph
 
 
-def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Dict[str, SwitchPort], adjacency: Dict[EndpointPair, int]
+def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Dict[str, SwitchPort], adjacency: Dict[SwitchPair, int]
                  ) -> Dict[MacPair, List[Path]]:
     base_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'B']
     computing_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'C']
@@ -192,8 +192,8 @@ class Controller(app_manager.RyuApp):
         self.mac_name: Dict[str, str]
         self.ip_mac: Dict[str, str]
         self.host_switch_port: Dict[str, SwitchPort]
-        self.adjacency: Dict[EndpointPair, int]
-        self.bw: Dict[EndpointPair, float]
+        self.adjacency: Dict[SwitchPair, int]
+        self.bw: Dict[SwitchPair, float]
         self.graph: nx.Graph
         self.mac_name, self.ip_mac, self.host_switch_port, self.adjacency, \
             self.bw, self.graph = load_topology(TOPOLOGY_FILE)
@@ -205,10 +205,10 @@ class Controller(app_manager.RyuApp):
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
-        self.available_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
-        self.used_bw: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
-        self.tx_bytes: Dict[EndpointPair, int] = defaultdict(lambda: 0)
-        self.clock: Dict[EndpointPair, float] = defaultdict(lambda: 0.0)
+        self.available_bw: Dict[SwitchPair, float] = defaultdict(lambda: 0.0)
+        self.used_bw: Dict[SwitchPair, float] = defaultdict(lambda: 0.0)
+        self.tx_bytes: Dict[SwitchPair, int] = defaultdict(lambda: 0)
+        self.clock: Dict[SwitchPair, float] = defaultdict(lambda: 0.0)
 
         self.done_switches: List[int] = []
         self.bottlenecks_socket: socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -237,16 +237,16 @@ class Controller(app_manager.RyuApp):
         while True:
             new_paths = self.active_paths.copy()
             size = int.from_bytes(self.paths_connection.recv(16), byteorder=byteorder)
-            data = self.paths_connection.recv(size).decode('utf-8')
-            for idx, path_idx in enumerate(data.split(',')):
-                client: str = int_to_mac(idx // BASE_STATIONS + 1)
-                server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
-                new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
-
-                if new_paths[client, server] != self.active_paths[client, server]:
-                    uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)
-                    install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
-                    self.active_paths[client, server] = new_paths[client, server]
+            data = self.paths_connection.recv(size).decode('utf-8').split(',')
+            if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
+                for idx, path_idx in enumerate(data):
+                    client: str = int_to_mac(idx // BASE_STATIONS + 1)
+                    server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
+                    new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
+                    if new_paths[client, server] != self.active_paths[client, server]:
+                        uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)
+                        install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
+                        self.active_paths[client, server] = new_paths[client, server]
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries

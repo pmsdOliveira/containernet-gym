@@ -12,7 +12,7 @@ import random
 import socket
 from sys import byteorder
 from threading import Thread
-from time import sleep
+from time import sleep, time
 from typing import Dict, List
 
 
@@ -69,12 +69,15 @@ def closest(values: List, number: float) -> int:
 
 def json_from_log(client: str, server: str, port: int) -> Dict:
     data: Dict = {}
-    while not data:
+    start_time: time = time()
+    current_time: time = time()
+    while not data and current_time - start_time < 120:
         try:
             with open(f"{DOCKER_VOLUME}/{client}_{server}_{port}.log", 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
             sleep(0.2)
+        current_time = time()
     return data
 
 
@@ -210,10 +213,11 @@ class SliceAdmissionEnv(Env):
         while True:
             bottlenecks = []
             size = int.from_bytes(self.bottlenecks_connection.recv(16), byteorder=byteorder)
-            data = self.bottlenecks_connection.recv(size).decode('utf-8')
-            for line in data.split('\n')[:-1]:
-                bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
-            self.bottlenecks = bottlenecks
+            data = self.bottlenecks_connection.recv(size).decode('utf-8').split('\n')[:-1]
+            if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
+                for line in data:
+                    bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
+                self.bottlenecks = bottlenecks
 
     def send_paths(self) -> None:
         data: str = ','.join(str(path) for path in self.active_paths)
@@ -237,18 +241,18 @@ class SliceAdmissionEnv(Env):
     def create_slice(self, clients: List[str], servers: List[str]) -> None:
         ports: List[int] = []
         for (client, server) in zip(clients, servers):
-            port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
-            ports += [port]
-            self.active_ports += [port]
-
-            self.active_connections += [f'{client}_{server}_{port}']
-
             connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
             bottleneck_idx: int = connection_idx * COMPUTING_STATIONS
             self.active_paths[connection_idx] = np.argmax(self.bottlenecks[bottleneck_idx:bottleneck_idx + PATHS]) \
                 if self.active_paths[connection_idx] == -1 else self.active_paths[connection_idx]
 
-            self.send_paths()
+        self.send_paths()
+
+        for (client, server) in zip(clients, servers):
+            port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
+            ports += [port]
+            self.active_ports += [port]
+            self.active_connections += [f'{client}_{server}_{port}']
             self.backend.slice(client, server, port, self.state[1], self.state[2])
 
         evaluator = Thread(target=self.slice_evaluator,
@@ -299,13 +303,16 @@ class SliceAdmissionEnv(Env):
 
         data: List[Dict] = []
         for (client, server, port) in zip(clients, servers, ports):
-            data += [json_from_log(client, server, port)]
+            result = json_from_log(client, server, port)
+            if result:
+                data += [result]
 
             self.active_connections.remove(f'{client}_{server}_{port}')
             if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection):
                 connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
                 self.active_paths[connection_idx] = -1
-                self.send_paths()
+
+        self.send_paths()
 
         reward: float = evaluate_elastic_slice(bw, price, data) if slice_type == 1 else evaluate_inelastic_slice(bw, price, data)
         self.departed_queue.put(dict(type=1 if slice_type == 1 else 2, reward=reward))
