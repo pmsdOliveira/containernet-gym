@@ -33,11 +33,11 @@ def read_templates(file: str) -> (List[Dict], List[Dict]):
     inelastic: List[Dict] = []
     with open(file, 'r') as request_templates:
         for template in request_templates.readlines()[2:]:
-            slice_type, duration, bw, price = template.split()
+            slice_type, bw, price = template.split()
             if slice_type == 'e':
-                elastic += [(int(duration), float(bw), float(price))]
+                elastic += [(float(bw), float(price))]
             else:
-                inelastic += [(int(duration), float(bw), float(price))]
+                inelastic += [(float(bw), float(price))]
     return elastic, inelastic
 
 
@@ -84,7 +84,7 @@ def json_from_log(client: str, server: str, port: int) -> Dict:
 def evaluate_elastic_slice(bw: float, full_price: float, data: List[Dict]) -> float:
     averages: List[float] = [connection["end"]["streams"][0]["receiver"]["bits_per_second"] / 1000000.0 for connection in data]
     total_average: float = sum(averages) / len(averages)
-    if total_average >= bw - bw * 0.05:
+    if total_average >= bw - bw * .1:
         print(f"Finished elastic slice {total_average} >= {bw}")
         return 0.0
     print(f"Failed elastic slice {total_average} < {bw}")
@@ -93,7 +93,7 @@ def evaluate_elastic_slice(bw: float, full_price: float, data: List[Dict]) -> fl
 
 def evaluate_inelastic_slice(bw: float, price: float, data: List[Dict]) -> float:
     worst: float = min(interval["streams"][0]["bits_per_second"] / 1000000.0 for connection in data for interval in connection["intervals"])
-    if worst >= bw - bw * 0.05:
+    if worst >= bw - bw * .1:
         print(f"Finished inelastic slice {worst} >= {bw}")
         return 0.0
     print(f"Finished inelastic slice {worst} < {bw}")
@@ -276,14 +276,11 @@ class SliceAdmissionEnv(Env):
             sleep(arrival)
 
             if self.generator_semaphore:  # ensures req isn't created if new req is created while inside loop
-                duration: int = closest(DURATION_TEMPLATES, np.random.exponential(DURATION_AVERAGE))
+                duration: int = max(int(np.random.exponential(DURATION_AVERAGE)), 1)
+                bw, price = random.choice(self.elastic_request_templates if slice_type == 1 else self.inelastic_request_templates)
 
-                if slice_type == 1:
-                    _, bw, price = random.choice([template for template in self.elastic_request_templates if template[0] == duration])
-                else:
-                    _, bw, price = random.choice([template for template in self.inelastic_request_templates if template[0] == duration])
-
-                number_connections = min(ceil(np.random.exponential(BASE_STATIONS / 2)), BASE_STATIONS)
+                # number_connections = min(ceil(np.random.exponential(BASE_STATIONS / 2)), BASE_STATIONS)
+                number_connections = random.randint(1, BASE_STATIONS // 2)
                 base_stations = random.sample(range(BASE_STATIONS), number_connections)
                 computing_stations = random.sample(range(COMPUTING_STATIONS), number_connections)
 

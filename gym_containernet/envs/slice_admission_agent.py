@@ -8,16 +8,13 @@ from collections import deque
 import copy
 
 l1 = 86
-l2 = 150
-l3 = 200
-l4 = 2
+l2 = 42
+l3 = 2
 
 q_net = torch.nn.Sequential(
     torch.nn.Linear(l1, l2),
     torch.nn.ReLU(),
-    torch.nn.Linear(l2, l3),
-    torch.nn.ReLU(),
-    torch.nn.Linear(l3, l4)
+    torch.nn.Linear(l2, l3)
 )
 
 target_net = copy.deepcopy(q_net)
