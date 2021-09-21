@@ -8,20 +8,23 @@ from collections import deque
 import copy
 
 l1 = 86
-l2 = 42
-l3 = 2
+l2 = 150
+l3 = 100
+l4 = 2
 
 q_net = torch.nn.Sequential(
     torch.nn.Linear(l1, l2),
     torch.nn.ReLU(),
-    torch.nn.Linear(l2, l3)
+    torch.nn.Linear(l2, l3),
+    torch.nn.ReLU(),
+    torch.nn.Linear(l3, l4)
 )
 
 target_net = copy.deepcopy(q_net)
 target_net.load_state_dict(q_net.state_dict())
 
 gamma = 0.9
-epsilon = 0.5
+epsilon = 0.3
 learning_rate = 1e-3
 
 loss_fn = torch.nn.MSELoss()
@@ -29,10 +32,10 @@ optimizer = torch.optim.Adam(q_net.parameters(), lr=learning_rate)
 
 losses = []
 total_reward_list = []
-epochs = 1000
-mem_size = 512
-batch_size = 128
-sync_freq = 256
+epochs = 5000
+mem_size = 1000
+batch_size = 200
+sync_freq = 500
 replay = deque(maxlen=mem_size)
 
 env = gym.make('slice-admission-v0')

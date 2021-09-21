@@ -128,8 +128,11 @@ def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> 
     for (src, dst), path_list in paths.items():
         for path_idx, path in enumerate(path_list):
             switches = [switch for (switch, in_port, out_port) in path]
-            pairs = [(switches[i], switches[i + 1]) for i in range(len(switches) - 1)]
-            bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair)['weight'] for pair in pairs)
+            if len(switches) > 1:
+                pairs = [(switches[i], switches[i + 1]) for i in range(len(switches) - 1)]
+                bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair)['weight'] for pair in pairs)
+            else:
+                bottlenecks[src, dst][path_idx] = 0
     return bottlenecks
 
 
@@ -141,9 +144,9 @@ def select_best_paths(paths: Dict[MacPair, List[Path]], bottlenecks: Dict[MacPai
         if paths_in_use[src, dst] != -1:  # if a path is in use, don't change it
             best_paths[src, dst] = paths[src, dst][paths_in_use[src, dst]]
         else:
-            best_bottleneck: float = float("Inf")
+            best_bottleneck: float = float("-Inf")
             for path_idx, path in enumerate(path_list):
-                if bottlenecks[src, dst][path_idx] < best_bottleneck:
+                if bottlenecks[src, dst][path_idx] > best_bottleneck:
                     best_bottleneck = bottlenecks[src, dst][path_idx]
                     best_paths[src, dst] = path
                     paths_in_use[src, dst] = path_idx
@@ -237,16 +240,19 @@ class Controller(app_manager.RyuApp):
         while True:
             new_paths = self.active_paths.copy()
             size = int.from_bytes(self.paths_connection.recv(16), byteorder=byteorder)
-            data = self.paths_connection.recv(size).decode('utf-8').split(',')
-            if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
-                for idx, path_idx in enumerate(data):
-                    client: str = int_to_mac(idx // BASE_STATIONS + 1)
-                    server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
-                    new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
-                    if new_paths[client, server] != self.active_paths[client, server]:
-                        uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)
-                        install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
-                        self.active_paths[client, server] = new_paths[client, server]
+            try:
+                data = self.paths_connection.recv(size).decode('utf-8').split(',')
+                if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
+                    for idx, path_idx in enumerate(data):
+                        client: str = int_to_mac(idx // BASE_STATIONS + 1)
+                        server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
+                        new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
+                        if new_paths[client, server] != self.active_paths[client, server]:
+                            uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)
+                            install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
+                            self.active_paths[client, server] = new_paths[client, server]
+            except OverflowError:
+                pass
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries

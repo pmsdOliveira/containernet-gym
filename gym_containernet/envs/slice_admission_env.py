@@ -16,8 +16,8 @@ from time import sleep, time
 from typing import Dict, List
 
 
-ELASTIC_ARRIVAL_AVERAGE = 5
-INELASTIC_ARRIVAL_AVERAGE = 10
+ELASTIC_ARRIVAL_AVERAGE = 4
+INELASTIC_ARRIVAL_AVERAGE = 8
 DURATION_AVERAGE = 15
 
 BASE_STATIONS = 4
@@ -110,7 +110,7 @@ class SliceAdmissionEnv(Env):
         self.state: np.ndarray = np.zeros(STATE_DIM, dtype=np.float32)
 
         self.requests: int = 0
-        self.max_requests: int = 12
+        self.max_requests: int = 50
         self.requests_queue: Queue = Queue(maxsize=self.max_requests)
         self.departed_queue: Queue = Queue(maxsize=self.max_requests)
 
@@ -213,11 +213,14 @@ class SliceAdmissionEnv(Env):
         while True:
             bottlenecks = []
             size = int.from_bytes(self.bottlenecks_connection.recv(16), byteorder=byteorder)
-            data = self.bottlenecks_connection.recv(size).decode('utf-8').split('\n')[:-1]
-            if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
-                for line in data:
-                    bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
-                self.bottlenecks = bottlenecks
+            try:
+                data = self.bottlenecks_connection.recv(size).decode('utf-8').split('\n')[:-1]
+                if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
+                    for line in data:
+                        bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
+                    self.bottlenecks = bottlenecks
+            except OverflowError:
+                pass
 
     def send_paths(self) -> None:
         data: str = ','.join(str(path) for path in self.active_paths)
