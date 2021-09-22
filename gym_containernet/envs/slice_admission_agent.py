@@ -1,11 +1,14 @@
 import gym_containernet
+
+from collections import deque
+import copy
+from datetime import datetime
 import numpy as np
 import torch
 import gym
-import random
 from matplotlib import pylab as plt
-from collections import deque
-import copy
+import random
+
 
 l1 = 86
 l2 = 150
@@ -41,9 +44,12 @@ replay = deque(maxlen=mem_size)
 env = gym.make('slice-admission-v0')
 
 for i in range(1, epochs + 1):
-    print(f"Epoch {i}:")
+    time = datetime.now().strftime("%H:%M:%S")
+    print(f'\n\n\n{time}\tEpoch {i}:')
     step = 1
     total_reward = 0
+    elastic = 0
+    inelastic = 0
     state = torch.flatten(torch.from_numpy(env.reset().astype(np.float32))).reshape(1, 86)
     done = False
 
@@ -51,7 +57,15 @@ for i in range(1, epochs + 1):
         print(f"Step {step}")
         step += 1
         qval = q_net(state).data.numpy()
-        action = np.random.randint(0, 2) if random.random() < epsilon else np.argmax(qval)
+        if not state[0][0]:
+            action = 0
+        else:
+            action = np.random.randint(0, 2) if random.random() < epsilon else np.argmax(qval)
+            if action:
+                if int(state[0][0]) == 1:
+                    elastic += 1
+                elif int(state[0][0]) == 2:
+                    inelastic += 1
 
         next_state, reward, done, _ = env.step(action)
         next_state = torch.flatten(torch.from_numpy(next_state.astype(np.float32))).reshape(1, 86)
@@ -73,7 +87,6 @@ for i in range(1, epochs + 1):
             Y = reward_batch + gamma * ((1 - done_batch) * torch.max(Q2, dim=1)[0])
             X = Q1.gather(dim=1, index=action_batch.long().unsqueeze(dim=1)).squeeze()
             loss = loss_fn(X, Y.detach())
-            # print(i, loss.item())
             optimizer.zero_grad()
             loss.backward()
             losses.append(loss.item())
@@ -84,13 +97,25 @@ for i in range(1, epochs + 1):
 
         total_reward += reward
 
-    total_reward_list.append(total_reward)
-    print(f"Episode reward: {total_reward}\n\n")
-    with open('results.txt', 'a') as results_file:
-        results_file.write(f'{total_reward}\n')
-
     if epsilon > 0.1:
         epsilon -= (1 / epochs)
+
+    if i % 50 == 0:
+        torch.save(q_net.state_dict({
+            'epoch': i,
+            'epsilon': epsilon,
+            'model_state_dict': q_net.state_dict(),
+            'target_state_dict': target_net.state_dict(),
+        }), f'models/{time}.pth')
+
+    total_reward_list.append(total_reward)
+    print(f"\nEpisode reward: {total_reward}")
+    print(f'Elastic: {elastic}\tInelastic: {inelastic}')
+
+    with open('rewards.txt', 'a') as results_file:
+        results_file.write(f'{total_reward}\n')
+    with open('accepted.txt', 'a') as accepted_file:
+        accepted_file.write(f'{elastic}\t{inelastic}\n')
 
 print('Plotting losses ...')
 plt.figure(figsize=(10, 7))

@@ -171,8 +171,8 @@ class SliceAdmissionEnv(Env):
 
         if self.state[0]:
             self.requests += 1
-            if action == 1:
-                print(f"Accepted request")
+            if action:
+                print(f"ACCEPT")
                 self.create_slice(*slice_connections_from_array(self.state[4:CONNECTIONS_OFFSET]))
                 if self.state[0] == 1:  # elastic slice
                     self.state[CONNECTIONS_OFFSET] += 1
@@ -180,7 +180,7 @@ class SliceAdmissionEnv(Env):
                     self.state[CONNECTIONS_OFFSET + 1] += 1
                 reward = self.state[1] * self.state[3]
             else:
-                print("Rejected request")
+                print("REJECT")
 
         if self.requests < self.max_requests:
             self.state_from_request(self.requests_queue.get(block=True))
@@ -192,7 +192,7 @@ class SliceAdmissionEnv(Env):
             if self.generator_semaphore:
                 self.stop_generators()
             for evaluator in self.evaluators:
-                if evaluator.is_alive():  # might create errors if a second evaluator finishes before this one
+                if evaluator.is_alive():  # might get stuck if a second evaluator finishes before this one
                     evaluator.join()
                     reward += self.state_from_departure(self.departed_queue.get())
                     # print(self.state)
@@ -220,7 +220,9 @@ class SliceAdmissionEnv(Env):
                         bottlenecks += [float(bottleneck) for bottleneck in line.split(',')]
                     self.bottlenecks = bottlenecks
             except OverflowError:
-                pass
+                print("\n\n\n\n\n\t\t\t\t\t\t\t\tOVERFLOW ERROR\n\n\n\n\n")
+            except MemoryError:
+                print("\n\n\n\n\n\t\t\t\t\t\t\t\tMEMORY ERROR\n\n\n\n\n")
 
     def send_paths(self) -> None:
         data: str = ','.join(str(path) for path in self.active_paths)
@@ -282,7 +284,6 @@ class SliceAdmissionEnv(Env):
                 duration: int = max(int(np.random.exponential(DURATION_AVERAGE)), 1)
                 bw, price = random.choice(self.elastic_request_templates if slice_type == 1 else self.inelastic_request_templates)
 
-                # number_connections = min(ceil(np.random.exponential(BASE_STATIONS / 2)), BASE_STATIONS)
                 number_connections = random.randint(1, BASE_STATIONS // 2)
                 base_stations = random.sample(range(BASE_STATIONS), number_connections)
                 computing_stations = random.sample(range(COMPUTING_STATIONS), number_connections)

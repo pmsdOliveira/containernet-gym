@@ -252,7 +252,9 @@ class Controller(app_manager.RyuApp):
                             install_path(client, server, self.paths[client, server][new_paths[client, server]], self.switch_datapath)
                             self.active_paths[client, server] = new_paths[client, server]
             except OverflowError:
-                pass
+                print("\n\n\n\n\n\t\t\t\t\t\t\t\tOVERFLOW ERROR\n\n\n\n\n")
+            except MemoryError:
+                print("\n\n\n\n\n\t\t\t\t\t\t\t\tMEMORY ERROR\n\n\n\n\n")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev) -> None:  # create table-miss entries
