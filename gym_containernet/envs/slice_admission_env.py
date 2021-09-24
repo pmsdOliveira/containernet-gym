@@ -1,5 +1,4 @@
 from topology_manager import TopologyManager, DOCKER_VOLUME
-from template_generator import DURATION_TEMPLATES
 
 from bisect import bisect_left
 from gym import Env

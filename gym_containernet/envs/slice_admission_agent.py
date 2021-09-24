@@ -44,7 +44,7 @@ replay = deque(maxlen=mem_size)
 env = gym.make('slice-admission-v0')
 
 for i in range(1, epochs + 1):
-    time = datetime.now().strftime("%H:%M:%S")
+    time = datetime.now().strftime("%d/%m/%Y_%H:%M:%S")
     print(f'\n\n\n{time}\tEpoch {i}:')
     step = 1
     total_reward = 0
@@ -101,12 +101,12 @@ for i in range(1, epochs + 1):
         epsilon -= (1 / epochs)
 
     if i % 50 == 0:
-        torch.save(q_net.state_dict({
+        torch.save({
             'epoch': i,
             'epsilon': epsilon,
             'model_state_dict': q_net.state_dict(),
             'target_state_dict': target_net.state_dict(),
-        }), f'models/{time}.pth')
+        }, f'models/{time}.pth')
 
     total_reward_list.append(total_reward)
     print(f"\nEpisode reward: {total_reward}")
