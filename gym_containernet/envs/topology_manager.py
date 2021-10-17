@@ -1,14 +1,13 @@
 from mininet.net import Containernet
 from mininet.node import RemoteController, Host, OVSSwitch
 from mininet.link import TCLink
+from mininet.cli import CLI
 
 from os import system
 from time import sleep
 from typing import Dict, List
 
-
-TOPOLOGY_FILE: str = 'topology.txt'
-DOCKER_VOLUME: str = '/home/pmsdoliveira/workspace/gym-containernet/docker-volume'
+from parameters import TOPOLOGY_FILE, DOCKER_VOLUME
 
 
 class TopologyManager:
@@ -41,8 +40,7 @@ class TopologyManager:
 
     def load_topology(self, file: str) -> None:
         with open(file, 'r') as topology:
-            host_idx: int = 1
-            for line in topology.readlines()[2:]:
+            for line in topology.readlines():
                 cols: List[str] = line.split()
                 for node in cols[:2]:
                     if node[0] == 'S':
@@ -65,3 +63,8 @@ class TopologyManager:
             dst.cmd(f'iperf3 -s -p {port} -i 1 &')
             src.cmd(f'iperf3 -c {dst.IP()} -p {port} -t {duration} -b {bw}M -J >& /home/volume/{source}_{destination}_{port}.log &')
             sleep(1)
+
+
+if __name__ == '__main__':
+    topo = TopologyManager()
+    CLI(topo.network)

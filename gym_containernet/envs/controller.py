@@ -16,12 +16,8 @@ from sys import byteorder
 import time
 from typing import Any, DefaultDict, Dict, List, Tuple, Union
 
+from parameters import TOPOLOGY_FILE, BASE_STATIONS, COMPUTING_STATIONS, PATHS, UPDATE_PERIOD
 
-TOPOLOGY_FILE = "topology.txt"
-BASE_STATIONS = 4
-COMPUTING_STATIONS = 4
-PATHS = 4
-UPDATE_PERIOD = 5   # seconds
 
 # Custom types
 SwitchPair = Tuple[int, int]  # (1, 2)
@@ -46,7 +42,7 @@ def load_topology(file: str
     graph: nx.Graph = nx.Graph()
 
     with open(file, 'r') as topology:
-        for line in topology.readlines()[2:]:
+        for line in topology.readlines():
             cols: List[str] = line.split()
             if cols[0][0] != 'S':  # host connects to
                 host_mac: str = int_to_mac(len(host_switch_port) + 1)
@@ -72,8 +68,8 @@ def load_topology(file: str
                     switch_ports[s2_idx] = switch_ports[s2_idx] + 1 if switch_ports.get(s2_idx) else 1
                     adjacency[s1_idx, s2_idx] = switch_ports[s1_idx]
                     adjacency[s2_idx, s1_idx] = switch_ports[s2_idx]
-                    link_bw[s1_idx, s2_idx] = float(cols[2])
-                    link_bw[s2_idx, s1_idx] = float(cols[2])
+                    link_bw[s1_idx, s2_idx] = float(cols[2]) * 1000
+                    link_bw[s2_idx, s1_idx] = float(cols[2]) * 1000
                     if s2_idx not in graph:
                         graph.add_node(s2_idx)
                     graph.add_edge(s1_idx, s2_idx, weight=float(cols[2]) * 1000)
@@ -92,16 +88,18 @@ def load_topology(file: str
 def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Dict[str, SwitchPort], adjacency: Dict[SwitchPair, int]
                  ) -> Dict[MacPair, List[Path]]:
     base_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'B']
-    computing_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and mac_name[node][0] == 'C']
+    computing_stations: List = [node for node in list(graph.nodes) if mac_name.get(node) and
+                                (mac_name[node][0] == 'C' or mac_name[node][0] == 'M')]
 
     all_paths = {}
+    cutoff = len(set(s1 for (s1, s2) in adjacency.keys())) // 3
     for bs in base_stations:
         for cs in computing_stations:
-            all_paths[bs, cs] = sorted(list(nx.all_simple_paths(graph, bs, cs)), key=lambda x: len(x))[:PATHS]
-            all_paths[cs, bs] = sorted(list(nx.all_simple_paths(graph, cs, bs)), key=lambda x: len(x))[:PATHS]
+            all_paths[bs, cs] = sorted(list(nx.all_simple_paths(graph, bs, cs, cutoff)), key=lambda x: len(x))[:PATHS]
+            all_paths[cs, bs] = sorted(list(nx.all_simple_paths(graph, cs, bs, cutoff)), key=lambda x: len(x))[:PATHS]
 
-    for paths in all_paths.values():
-        for path_idx, path in enumerate(paths):
+    for bs_cs_path_list in all_paths.values():
+        for path_idx, path in enumerate(bs_cs_path_list):
             installable_path: Path = []
             (switch, in_port) = host_switch_port[path[0]]
             if len(path) == 3:  # only goes through one switch
@@ -117,14 +115,14 @@ def create_paths(graph: nx.Graph, mac_name: Dict[str, str], host_switch_port: Di
                     out_port: int = adjacency[switch, section[2]]
                     installable_path.append((switch, in_port, out_port))
                 (switch, out_port) = host_switch_port[path[-1]]
-                in_port: int = adjacency[path[1], path[2]]
+                in_port: int = adjacency[path[-2], path[-3]]
                 installable_path.append((switch, in_port, out_port))
-            paths[path_idx] = installable_path
+            bs_cs_path_list[path_idx] = installable_path
     return all_paths
 
 
 def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> Dict[MacPair, List[float]]:
-    bottlenecks: Dict[MacPair, Union[List[None], List[float]]] = defaultdict(lambda: PATHS * [None])
+    bottlenecks: Dict[MacPair, Union[List[None], List[float]]] = defaultdict(lambda: PATHS * [0.0])
     for (src, dst), path_list in paths.items():
         for path_idx, path in enumerate(path_list):
             switches = [switch for (switch, in_port, out_port) in path]
@@ -132,7 +130,7 @@ def get_paths_bottlenecks(graph: nx.Graph, paths: Dict[MacPair, List[Path]]) -> 
                 pairs = [(switches[i], switches[i + 1]) for i in range(len(switches) - 1)]
                 bottlenecks[src, dst][path_idx] = min(graph.get_edge_data(*pair)['weight'] for pair in pairs)
             else:
-                bottlenecks[src, dst][path_idx] = 0
+                bottlenecks[src, dst][path_idx] = 1000000.0
     return bottlenecks
 
 
@@ -202,9 +200,8 @@ class Controller(app_manager.RyuApp):
             self.bw, self.graph = load_topology(TOPOLOGY_FILE)
 
         self.paths: Dict[MacPair, List[Path]] = create_paths(self.graph, self.mac_name, self.host_switch_port, self.adjacency)
-        self.bottlenecks: Dict[MacPair, List[float]] = get_paths_bottlenecks(self.graph, self.paths)
+        self.bottlenecks: DefaultDict[MacPair, List[float]] = defaultdict(lambda: [0.0] * PATHS)
         self.active_paths: DefaultDict[MacPair, int] = defaultdict(lambda: -1)
-        _, self.active_paths = select_best_paths(self.paths, self.bottlenecks, self.active_paths)
 
         self.switch_datapath: Dict[int, Datapath] = {}
 
@@ -244,8 +241,8 @@ class Controller(app_manager.RyuApp):
                 data = self.paths_connection.recv(size).decode('utf-8').split(',')
                 if len(data) == BASE_STATIONS * COMPUTING_STATIONS:
                     for idx, path_idx in enumerate(data):
-                        client: str = int_to_mac(idx // BASE_STATIONS + 1)
-                        server: str = int_to_mac(idx % BASE_STATIONS + BASE_STATIONS + 1)
+                        client: str = int_to_mac(idx // COMPUTING_STATIONS + 1)
+                        server: str = int_to_mac(idx % COMPUTING_STATIONS + BASE_STATIONS + 1)
                         new_paths[client, server] = int(path_idx) if int(path_idx) != -1 else 0
                         if new_paths[client, server] != self.active_paths[client, server]:
                             uninstall_path(client, server, self.paths[client, server][self.active_paths[client, server]], self.switch_datapath)

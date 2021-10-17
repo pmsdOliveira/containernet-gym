@@ -4,7 +4,6 @@ from bisect import bisect_left
 from gym import Env
 from gym.spaces import Box, Discrete
 import json
-from math import ceil
 import numpy as np
 from queue import Queue
 import random
@@ -14,24 +13,16 @@ from threading import Thread
 from time import sleep, time
 from typing import Dict, List
 
-
-ELASTIC_ARRIVAL_AVERAGE = 4
-INELASTIC_ARRIVAL_AVERAGE = 8
-DURATION_AVERAGE = 15
-
-BASE_STATIONS = 4
-COMPUTING_STATIONS = 4
-PATHS = 4
-
-CONNECTIONS_OFFSET = 4 + BASE_STATIONS * COMPUTING_STATIONS
-STATE_DIM = 6 + BASE_STATIONS * COMPUTING_STATIONS * (1 + PATHS)
+from parameters import BASE_STATIONS, COMPUTING_STATIONS, PATHS, CONNECTIONS_OFFSET, INPUT_DIM, OUTPUT_DIM
+from parameters import ELASTIC_ARRIVAL_AVERAGE, INELASTIC_ARRIVAL_AVERAGE, DURATION_AVERAGE, CONNECTIONS_AVERAGE
+from parameters import MAX_REQUESTS, STARTUP_TIME, LOG_TIMEOUT, PORT_RANGE
 
 
 def read_templates(file: str) -> (List[Dict], List[Dict]):
     elastic: List[Dict] = []
     inelastic: List[Dict] = []
     with open(file, 'r') as request_templates:
-        for template in request_templates.readlines()[2:]:
+        for template in request_templates.readlines():
             slice_type, bw, price = template.split()
             if slice_type == 'e':
                 elastic += [(float(bw), float(price))]
@@ -41,7 +32,7 @@ def read_templates(file: str) -> (List[Dict], List[Dict]):
 
 
 def slice_connections_from_array(connections: List) -> (List[str], List[str]):
-    parsed_connections = [connections[i:i + BASE_STATIONS] for i in range(0, len(connections), BASE_STATIONS)]
+    parsed_connections = [connections[i:i + COMPUTING_STATIONS] for i in range(0, len(connections), COMPUTING_STATIONS)]
 
     clients: List[str] = []
     servers: List[str] = []
@@ -49,7 +40,8 @@ def slice_connections_from_array(connections: List) -> (List[str], List[str]):
         for cs_idx, connected in enumerate(base_station):
             if connected:
                 clients += [f'BS{bs_idx + 1}']
-                servers += [f'CS{cs_idx + 1}']
+                servers += [f'{"MECS" if cs_idx < COMPUTING_STATIONS // 2 else "CS"}'
+                            f'{cs_idx + 1 if (cs_idx < COMPUTING_STATIONS // 2) else (cs_idx - COMPUTING_STATIONS // 2 + 1)}']
     return clients, servers
 
 
@@ -70,7 +62,7 @@ def json_from_log(client: str, server: str, port: int) -> Dict:
     data: Dict = {}
     start_time: time = time()
     current_time: time = time()
-    while not data and current_time - start_time < 120:
+    while not data and current_time - start_time < LOG_TIMEOUT:
         try:
             with open(f"{DOCKER_VOLUME}/{client}_{server}_{port}.log", 'r') as f:
                 data = json.load(f)
@@ -103,15 +95,17 @@ class SliceAdmissionEnv(Env):
     def __init__(self):
         self.backend: TopologyManager = TopologyManager()
 
-        self.observation_space: Box = Box(low=np.zeros(STATE_DIM, dtype=np.float32), high=np.full(STATE_DIM, 1000.0, dtype=np.float32),
-                                          dtype=np.float32)
-        self.action_space: Discrete = Discrete(2)
-        self.state: np.ndarray = np.zeros(STATE_DIM, dtype=np.float32)
+        low = np.zeros(INPUT_DIM, dtype=np.float32)
+        high = np.array([2.0, 60.0, 100.0, 2.0] + [1.0] * BASE_STATIONS * COMPUTING_STATIONS +
+                        [float(MAX_REQUESTS)] * 2 + [750.0] * BASE_STATIONS * COMPUTING_STATIONS * PATHS,
+                        dtype=np.float32)
+        self.observation_space: Box = Box(low=low, high=high, dtype=np.float32)
+        self.action_space: Discrete = Discrete(OUTPUT_DIM)
+        self.state: np.ndarray = np.zeros(INPUT_DIM, dtype=np.float32)
 
         self.requests: int = 0
-        self.max_requests: int = 50
-        self.requests_queue: Queue = Queue(maxsize=self.max_requests)
-        self.departed_queue: Queue = Queue(maxsize=self.max_requests)
+        self.requests_queue: Queue = Queue(maxsize=MAX_REQUESTS)
+        self.departed_queue: Queue = Queue(maxsize=MAX_REQUESTS)
 
         self.generator_semaphore: bool = False
         self.elastic_generator = None
@@ -136,16 +130,16 @@ class SliceAdmissionEnv(Env):
             self.bottlenecks_connection, _ = bottlenecks_socket.accept()
             Thread(target=self.receive_bottlenecks).start()
 
-        sleep(10)  # give the controller time to build starting paths
+        sleep(STARTUP_TIME)  # give the controller time to build starting paths
         self.paths_socket.connect(('127.0.0.1', 6655))
 
     def reset(self) -> object:
         self.backend.clear_logs()
-        self.state = np.zeros(86, dtype=np.float32)
+        self.state = np.zeros(INPUT_DIM, dtype=np.float32)
 
         self.requests = 0
-        self.requests_queue = Queue(maxsize=self.max_requests)
-        self.departed_queue = Queue(maxsize=self.max_requests)
+        self.requests_queue = Queue(maxsize=MAX_REQUESTS)
+        self.departed_queue = Queue(maxsize=MAX_REQUESTS)
 
         self.active_ports = []
         self.active_paths = BASE_STATIONS * COMPUTING_STATIONS * [-1]
@@ -181,7 +175,7 @@ class SliceAdmissionEnv(Env):
             else:
                 print("REJECT")
 
-        if self.requests < self.max_requests:
+        if self.requests < MAX_REQUESTS:
             self.state_from_request(self.requests_queue.get(block=True))
             if self.state[0] == 0:  # slice departure
                 departure = self.departed_queue.get()
@@ -245,15 +239,16 @@ class SliceAdmissionEnv(Env):
     def create_slice(self, clients: List[str], servers: List[str]) -> None:
         ports: List[int] = []
         for (client, server) in zip(clients, servers):
-            connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
-            bottleneck_idx: int = connection_idx * COMPUTING_STATIONS
+            connection_idx: int = (int(client[2:]) - 1) * COMPUTING_STATIONS + \
+                                  (int(server[4:]) - 1 if server[0] == 'M' else int(server[2:]) + BASE_STATIONS - 1)
+            bottleneck_idx: int = connection_idx * BASE_STATIONS
             self.active_paths[connection_idx] = np.argmax(self.bottlenecks[bottleneck_idx:bottleneck_idx + PATHS]) \
                 if self.active_paths[connection_idx] == -1 else self.active_paths[connection_idx]
 
         self.send_paths()
 
         for (client, server) in zip(clients, servers):
-            port: int = random.choice([port for port in range(1024, 2049) if port not in self.active_ports])
+            port: int = random.choice([port for port in range(*PORT_RANGE) if port not in self.active_ports])
             ports += [port]
             self.active_ports += [port]
             self.active_connections += [f'{client}_{server}_{port}']
@@ -280,10 +275,10 @@ class SliceAdmissionEnv(Env):
             sleep(arrival)
 
             if self.generator_semaphore:  # ensures req isn't created if new req is created while inside loop
-                duration: int = max(int(np.random.exponential(DURATION_AVERAGE)), 1)
+                duration: int = min(max(int(np.random.exponential(DURATION_AVERAGE)), 1), 60)
                 bw, price = random.choice(self.elastic_request_templates if slice_type == 1 else self.inelastic_request_templates)
 
-                number_connections = random.randint(1, BASE_STATIONS // 2)
+                number_connections = min(max(int(np.random.exponential(CONNECTIONS_AVERAGE)), 1), BASE_STATIONS)
                 base_stations = random.sample(range(BASE_STATIONS), number_connections)
                 computing_stations = random.sample(range(COMPUTING_STATIONS), number_connections)
 
@@ -308,8 +303,9 @@ class SliceAdmissionEnv(Env):
                 data += [result]
 
             self.active_connections.remove(f'{client}_{server}_{port}')
-            if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection):
-                connection_idx: int = (int(client[2:]) - 1) * BASE_STATIONS + (int(server[2:]) - 1)
+            if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection): # if no one else is using this path
+                connection_idx: int = (int(client[2:]) - 1) * COMPUTING_STATIONS + \
+                                      (int(server[4:]) - 1 if server[0] == 'M' else int(server[2:]) + BASE_STATIONS - 1)
                 self.active_paths[connection_idx] = -1
 
         self.send_paths()
