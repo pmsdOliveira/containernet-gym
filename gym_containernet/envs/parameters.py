@@ -33,8 +33,8 @@ LOG_TIMEOUT: int = 90
 # AGENT
 
 INPUT_DIM: int = 6 + BASE_STATIONS * COMPUTING_STATIONS * (1 + PATHS)
-HL1: int = 1000
-HL2: int = 800
+HL1: int = 1800
+HL2: int = 1200
 OUTPUT_DIM: int = 2
 
 GAMMA: float = 0.9

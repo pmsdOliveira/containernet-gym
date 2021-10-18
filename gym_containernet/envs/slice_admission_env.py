@@ -303,7 +303,7 @@ class SliceAdmissionEnv(Env):
                 data += [result]
 
             self.active_connections.remove(f'{client}_{server}_{port}')
-            if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection): # if no one else is using this path
+            if not sum(1 for connection in self.active_connections if f'{client}_{server}' in connection):  # if no one else is using this path
                 connection_idx: int = (int(client[2:]) - 1) * COMPUTING_STATIONS + \
                                       (int(server[4:]) - 1 if server[0] == 'M' else int(server[2:]) + BASE_STATIONS - 1)
                 self.active_paths[connection_idx] = -1
